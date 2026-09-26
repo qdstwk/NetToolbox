@@ -505,6 +505,22 @@ struct IntegratedSSHGCMCipher {
     }
 }
 
+
+private actor SSHSendGate {
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func enter() async {
+        if !busy { busy = true; return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func leave() {
+        if waiters.isEmpty { busy = false }
+        else { waiters.removeFirst().resume() }
+    }
+}
+
 // MARK: - SSHClient
 
 /// Outcome of a one-shot SSH exec session.
@@ -597,8 +613,10 @@ final class IntegratedSSHClient: @unchecked Sendable {
     private let pinnedHostKey: PinnedSSHHostKey? // UI/持久化层传入的既有 pin；这里绝不自动覆盖
     private var inbound: [UInt8] = []
     private var encrypt: IntegratedSSHGCMCipher?
+    private let sendGate = SSHSendGate()       // 串行化所有 outbound packet，保护 AES-GCM nonce/counter 不发生并发复用
     private var decrypt: IntegratedSSHGCMCipher?
     private var hostKeyVerified = false
+    private var negotiatedHostKeyAlgorithm = "" // KEXINIT 实际选中的服务器签名算法；验签时必须与 Host Key 对应
 
     private(set) var diagnostics = ""
     private(set) var stage = "connect"
@@ -643,7 +661,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
         let clientKexInit = try buildKexInit()
         try await sendPacket(clientKexInit)
         let serverKexInit = try await expect(Msg.kexInit)
-        try requireCiphers(in: serverKexInit)
+        negotiatedHostKeyAlgorithm = try requireAlgorithms(in: serverKexInit)
 
         let priv = Curve25519.KeyAgreement.PrivateKey()
         let qc = priv.publicKey.rawRepresentation
@@ -678,6 +696,12 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
         var keyTypeReader = IntegratedSSHWire.Reader(hostKey)
         hostKeyTypeName = keyTypeReader.readStringUTF8() ?? "?"
+        // negotiated rsa-sha2-* 使用 ssh-rsa 公钥 blob；Ed25519/ECDSA 则算法名与 blob 类型相同。
+        let expectedBlobType = negotiatedHostKeyAlgorithm.hasPrefix("rsa-sha2-") ? "ssh-rsa" : negotiatedHostKeyAlgorithm
+        guard hostKeyTypeName == expectedBlobType else { throw SSHError.invalidHostKeySignature }
+        // 签名 blob 内的算法名也必须等于 KEXINIT 真正协商出的 host-key algorithm。
+        var negotiatedSigReader = IntegratedSSHWire.Reader(signature)
+        guard negotiatedSigReader.readStringUTF8() == negotiatedHostKeyAlgorithm else { throw SSHError.invalidHostKeySignature }
         fingerprint = PinnedSSHHostKey.sha256Fingerprint(of: hostKey)
         // 安全边界 2：在构造任何密码认证包之前完成 TOFU/pin 决策。
         switch SSHHostTrust.evaluate(host: host, port: port, keyType: hostKeyTypeName, keyBlob: hostKey, pinned: pinnedHostKey) {
@@ -912,7 +936,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
     /// Confirms the server offers curve25519 key exchange and our GCM cipher
     /// in both directions — the only combination this client implements.
-    private func requireCiphers(in kexInit: Data) throws {
+    private func requireAlgorithms(in kexInit: Data) throws -> String {
         var reader = IntegratedSSHWire.Reader(kexInit)
         _ = reader.readByte()
         for _ in 0..<16 { _ = reader.readByte() }         // cookie
@@ -923,14 +947,20 @@ final class IntegratedSSHClient: @unchecked Sendable {
               let compC2S = reader.readNameList(), let compS2C = reader.readNameList() else { throw SSHError.kexFailed }
         // 我方每类只宣告一个实际实现；服务器不包含它就直接失败，避免“协商 A、执行 B”。
         guard kex.contains("curve25519-sha256"),
-              hostKeys.contains(where: { ["ssh-ed25519","ecdsa-sha2-nistp256","rsa-sha2-512","rsa-sha2-256"].contains($0) }),
               c2s.contains("aes256-gcm@openssh.com"), s2c.contains("aes256-gcm@openssh.com"),
               compC2S.contains("none"), compS2C.contains("none") else { throw SSHError.noCipher }
+        // RFC 4253：我方 preference list 中第一个也被服务器支持的算法才是实际协商结果。
+        let ourHostPreference = ["ssh-ed25519","ecdsa-sha2-nistp256","rsa-sha2-512","rsa-sha2-256"]
+        guard let selectedHostKey = ourHostPreference.first(where: { hostKeys.contains($0) }) else { throw SSHError.noCipher }
+        return selectedHostKey
     }
 
     // MARK: - Packet framing
 
     private func sendPacket(_ payload: Data) async throws {
+        // 多个 UI/reader task 即使同时要求发送，也必须严格串行；GCM nonce 每包只能消费一次。
+        await sendGate.enter()
+        defer { Task { await sendGate.leave() } }
         if var cipher = encrypt {
             var pad = 16 - ((1 + payload.count) % 16)
             if pad < 4 { pad += 16 }
