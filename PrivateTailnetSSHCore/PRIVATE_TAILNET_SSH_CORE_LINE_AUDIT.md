@@ -172,3 +172,20 @@ Revision 3 should therefore be a security-hardened runnable candidate, not an at
 - Compute and bind the exact negotiated host-key algorithm, including rsa-sha2-256/512 mapping to an ssh-rsa public-key blob, rather than merely accepting any supported host-key blob after membership checks.
 - Remove or serialize any possibility of concurrent mutation of outbound cipher state. Inbound and outbound GCM counters are separate, but multiple concurrent sendPacket calls must never race the outbound counter.
 - Re-scan all untrusted length/allocation paths and password/log/persistence paths after those changes.
+## Revision 3 pre-password security gate — 2026-09-26
+- R3 current commit: eb500bfff1f85103d2fe4b0a58f18540868dd316
+- Exact negotiated host-key algorithm is now retained and bound to both the presented host-key blob type and signature algorithm. rsa-sha2-* correctly maps to an ssh-rsa key blob while requiring the negotiated rsa-sha2 signature name.
+- All outbound packet construction is serialized through SSHSendGate so concurrent UI tasks cannot race the AES-GCM outbound nonce/counter.
+- AES-GCM counter exhaustion hard-fails; wrap/reuse is prohibited.
+- Password-bearing userauth Data is best-effort zeroed immediately after sendPacket returns, including the error path. Swift String storage cannot be guaranteed zeroized by the language/runtime; this residual is documented rather than falsely claimed away.
+- Static sensitive-path scan: no external imports beyond Foundation/Network/CryptoKit/Security; no UserDefaults/Keychain/SecItem/clipboard/CloudKit/password logging; no try!, fatalError, forced cast, or Swift random-number call.
+- Untrusted encrypted packet length is capped at 1 MiB before body allocation/read; identification-line accumulation is capped at 8 KiB.
+
+### Security gate disposition
+All currently identified CRITICAL pre-password blockers are addressed in R3 or closed by normative/reference confirmation. R3 is suitable to advance to compile/interoperability testing without intentionally accepting a known password-disclosure/MITM fail-open path.
+
+Residuals to keep visible during testing/security follow-up:
+- Swift String/Data copying prevents a formal guarantee of in-memory password zeroization.
+- Long-lived shell rekey is not yet implemented; do not treat R3 as a finished general-purpose SSH client until rekey policy is added/tested.
+- Functional/channel bugs remain intentionally deferred to live testing unless they reveal a security impact.
+- Tailnet-only destination enforcement is an application policy decision above the SSH core; the core itself accepts any host string supplied by its caller.
