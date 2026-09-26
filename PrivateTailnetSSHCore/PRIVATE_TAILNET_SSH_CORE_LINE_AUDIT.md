@@ -118,3 +118,30 @@ Audit target remains revision 2 commit 6e95a7120980797ff1c8c8c7635ea0b28187a665.
 
 ### Rekey
 - RFC 4253 permits either side to initiate rekey with SSH_MSG_KEXINIT; AES-GCM guidance also assumes fresh K/H/keys after rekey while session_id remains unchanged. Current established-session nextPayload does not implement this state transition. FIX before approving long-lived interactive shell.
+## Audit scope decision — security first
+
+Per project decision, pre-runtime review now prioritizes security properties over general interoperability/correctness bugs.
+
+### Must resolve before password-bearing live test
+1. Server KEX signature failure must abort before userauth.
+2. First-use host key must require explicit confirmation before userauth.
+3. Existing pin mismatch must hard-fail before password construction/transmission.
+4. Algorithm negotiation must not permit an algorithm different from the implementation actually used.
+5. X25519 shared-secret validation/encoding must not undermine KEX authentication/key derivation.
+6. RSA/ECDSA/Ed25519 host-signature verification must not accept invalid signatures through API/encoding mistakes.
+7. AES-GCM packet authentication/nonce handling must not permit nonce reuse or unauthenticated ciphertext acceptance.
+8. Password must not be persisted, logged, copied into diagnostics, cloud sync, clipboard, profile Codable state, or other durable storage.
+9. Malformed/untrusted network lengths must be bounded before allocation/read to prevent obvious memory exhaustion/crash paths.
+10. Concurrency must not permit cipher nonce/counter state reuse or corruption.
+11. Randomness used for security-sensitive protocol values must come from an auditable cryptographically secure system source.
+
+### Record now; debug during live interoperability testing unless security-relevant
+- PTY dimensions and resize behavior.
+- stdout/stderr presentation differences.
+- exact terminal UX.
+- channel-window tuning that only causes stalls, provided it cannot create a security boundary bypass.
+- server-specific banner quirks.
+- cosmetic diagnostics.
+- non-security compatibility with uncommon algorithms/servers.
+
+Revision 3 should therefore be a security-hardened runnable candidate, not an attempt to pre-fix every possible SSH interoperability bug.
