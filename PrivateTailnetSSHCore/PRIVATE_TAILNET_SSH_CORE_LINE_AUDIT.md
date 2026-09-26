@@ -97,3 +97,24 @@ Audit target remains revision 2 commit 6e95a7120980797ff1c8c8c7635ea0b28187a665.
 - Every security-relevant declaration, state field, protocol field, magic constant, guard, conversion, and state transition must carry a concise Chinese comment explaining purpose and failure/security meaning.
 - Closing braces and syntactically self-evident punctuation do not need noise comments.
 - Revision 3 will be generated only after the remaining normative passes are complete, so the commented repaired file is one coherent revision rather than a chain of moving partial fixes.
+## Normative pass 2 — packet/channel/ECDSA/rekey
+
+### Packet structure
+- RFC 4253/RFC 5647 require random padding length at least 4 and below 256. Current extractPayload accepts padding_length below 4. FIX.
+- RFC 5647 confirms the AES-GCM authentication tag occupies the SSH MAC field and the plaintext portion is padding_length + payload + random_padding. Exact OpenSSH variant details remain to be cross-checked.
+
+### Channel flow control
+- RFC 4254 states every non-open channel message carries the recipient channel number. Current code often reads and discards it. FIX: validate against the local channel.
+- RFC 4254 requires send amount to respect BOTH remote window and remote maximum packet size. Current code ignores both values returned by CHANNEL_OPEN_CONFIRMATION. FIX.
+- RFC 4254 states CHANNEL_EXTENDED_DATA consumes the same receive window as ordinary data. Current exec accounting excludes stderr. FIX.
+- Interactive shell currently does not replenish its receive window. FIX.
+
+### ECDSA host key
+- RFC 5656 requires the embedded curve identifier and key/signature algorithm to correspond. Current verifier merely discards the curve-name field. FIX: require nistp256 exactly.
+- RFC 5656 defines r and s as mpints. Oversized/noncanonical values must be rejected; current pad32 truncation is not acceptable. FIX.
+
+### RSA SHA-2 host key
+- RFC 8332 confirms an RSA host public-key blob remains encoded as ssh-rsa while the negotiated/signature algorithm is rsa-sha2-256 or rsa-sha2-512. Final negotiation code must distinguish public-key blob type from negotiated host-key algorithm.
+
+### Rekey
+- RFC 4253 permits either side to initiate rekey with SSH_MSG_KEXINIT; AES-GCM guidance also assumes fresh K/H/keys after rekey while session_id remains unchanged. Current established-session nextPayload does not implement this state transition. FIX before approving long-lived interactive shell.
