@@ -635,7 +635,7 @@ enum SSHError: LocalizedError {
     case noCipher
     case kexFailed
     case invalidHostKeySignature              // 服务器无法证明自己持有 Host Key 私钥：必须在发送密码前终止
-    case untrustedHostKey(PinnedSSHHostKey) // 首次连接：把指纹交给 UI，由用户确认后重连
+    case hostKeyConfirmationRequired(PinnedSSHHostKey) // 首次连接：把指纹交给 UI，由用户确认后重连
     case hostKeyChanged                       // 已固定的 Host Key 发生变化：硬阻断，绝不自动替换
     case authFailed
     case channelFailed
@@ -654,7 +654,7 @@ enum SSHError: LocalizedError {
         case .noCipher: return "No supported SSH cipher"
         case .kexFailed: return "SSH key exchange failed"
         case .invalidHostKeySignature: return "SSH server host-key signature is invalid"
-        case .untrustedHostKey(let key): return "Confirm SSH host key before login: \(key.fingerprint)"
+        case .hostKeyConfirmationRequired(let key): return "Confirm SSH host key before login: \(key.fingerprint)"
         case .hostKeyChanged: return "SSH host key changed; password was not sent"
         case .authFailed: return "SSH authentication failed"
         case .channelFailed: return "SSH channel failed"
@@ -823,8 +823,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
         case .trusted:
             break                                      // exact key match：允许进入 userauth
         case .firstUse(let presented):
-            let confirmationError: SSHError = .untrustedHostKey(presented)
-            throw confirmationError                    // UI 确认并保存 pin 后重新连接
+            throw makeHostKeyConfirmationError(presented) // UI 确认并保存 pin 后重新连接
         case .changed:
             throw SSHError.hostKeyChanged              // key 变化绝不在本次连接中提供“继续”旁路
         }
@@ -854,6 +853,13 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
     /// 密码认证：只有在 KEX 签名验证和 Host Key pin 检查全部通过后才会进入这里。
 // [ANNOTATION] 构造 password userauth request 并等待 success/failure；发送后对承载明文密码的临时 Data 做 best-effort 清零。Swift String 本身仍无法保证内存零化。
+    // Swift Playgrounds/Swift 6 diagnostic workaround: construct the payload-bearing
+    // error in a tiny explicitly typed helper so the large establish() body does not
+    // feed this enum construction into the same constraint-solver expression.
+    private func makeHostKeyConfirmationError(_ key: PinnedSSHHostKey) -> SSHError {
+        SSHError.hostKeyConfirmationRequired(key)
+    }
+
     private func authenticate(username: String, auth: SSHAuth) async throws {
         var request = Data([Msg.userauthRequest])
         IntegratedSSHWire.putString(username, into: &request)
