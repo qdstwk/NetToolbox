@@ -88,3 +88,15 @@ Not adopted from Rootshell:
 - generic sync/tombstone machinery;
 - accept-once by default;
 - NIOSSH/Citadel/NIO transport types.
+
+
+### PTSSH-011 — KEX/cipher negotiation can disagree with the algorithm actually executed (HIGH)
+Client KEXINIT advertises curve25519-sha256 before curve25519-sha256@libssh.org and aes256-gcm before aes128-gcm. requireCiphers merely checks that either Curve25519 name exists somewhere and that aes256-gcm exists somewhere. It does not compute the negotiated first mutual algorithm for every mandatory category. The code then unconditionally runs Curve25519 and derives 32-byte AES-256 keys. A server preference/list combination can therefore be accepted without proving that the transport being executed is the transport negotiated by RFC 4253 rules.
+
+Final core will parse the complete server KEXINIT and compute/validate exact negotiated values before sending KEXECDH_INIT. For MVP, fail closed unless exact negotiated algorithms are in the audited set. Do not advertise aes128-gcm until an audited aes128 path exists.
+
+### PTSSH-012 — advertised MAC list is misleading with AEAD-only implementation (MEDIUM)
+The MVP transport implements OpenSSH AES-GCM AEAD and does not implement the advertised hmac-sha2-256/hmac-sha2-512 packet MAC paths. Although AEAD negotiation makes separate MAC selection irrelevant in the successful GCM path, advertising unsupported algorithms increases ambiguity and future negotiation risk. The audited KEXINIT should accurately describe only implemented behavior and explicitly handle AEAD semantics.
+
+### Rootshell comparison: algorithm policy
+Rootshell's SSHCustomAlgorithms demonstrates broader mature compatibility (additional KEX and CTR/ETM schemes), but these depend on NIOSSH/Citadel and are intentionally NOT imported into the Playground core. PrivateTailnetSSH prefers a narrow, audited algorithm set over broad compatibility for its known modern OpenSSH servers.
