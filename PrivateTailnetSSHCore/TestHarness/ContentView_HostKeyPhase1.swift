@@ -4,7 +4,7 @@ struct ContentView: View {
     // Phase 1 only: discover and display the server Host Key.
     // The Core must throw hostKeyConfirmationRequired BEFORE authentication,
     // so this placeholder must never be transmitted on a first-use connection.
-    private let host = "100.103.214.110"
+    private let host = "100.69.114.104"
     private let port: UInt16 = 22
     private let username = "qdstwk"
 
