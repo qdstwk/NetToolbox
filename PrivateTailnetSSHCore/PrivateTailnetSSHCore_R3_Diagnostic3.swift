@@ -319,7 +319,7 @@ enum IntegratedSSHWire {
         while bytes.first == 0 { bytes.removeFirst() }   // strip leading zeros
         if bytes.isEmpty {
             data = putUInt32(0, into: data)
-            return
+            return data
         }
         if bytes[0] & 0x80 != 0 { bytes.insert(0, at: 0) }
         data = putString(Data(bytes), into: data)
