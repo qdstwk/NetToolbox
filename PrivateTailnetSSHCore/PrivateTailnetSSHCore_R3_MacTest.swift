@@ -635,7 +635,7 @@ enum SSHError: LocalizedError {
     case noCipher
     case kexFailed
     case invalidHostKeySignature              // 服务器无法证明自己持有 Host Key 私钥：必须在发送密码前终止
-    case hostKeyConfirmationRequired(PinnedSSHHostKey) // 首次连接：把指纹交给 UI，由用户确认后重连
+    case hostKeyConfirmationRequired(key: PinnedSSHHostKey) // 首次连接：把指纹交给 UI，由用户确认后重连；显式 label 避免 Swift 6 名称解析歧义
     case hostKeyChanged                       // 已固定的 Host Key 发生变化：硬阻断，绝不自动替换
     case authFailed
     case channelFailed
@@ -816,7 +816,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
         case .trusted:
             break                                      // exact key match：允许进入 userauth
         case .firstUse(let presented):
-            throw SSHError.hostKeyConfirmationRequired(&presented) // UI 确认并保存 pin 后重新连接
+            throw SSHError.hostKeyConfirmationRequired(key: presented) // UI 确认并保存 pin 后重新连接
         case .changed:
             throw SSHError.hostKeyChanged              // key 变化绝不在本次连接中提供“继续”旁路
         }
