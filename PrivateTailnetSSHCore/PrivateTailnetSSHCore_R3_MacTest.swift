@@ -414,7 +414,7 @@ enum IntegratedSSHCrypto {
 // [ANNOTATION] 实现 RFC 4253 KDF。使用 K、交换哈希 H、方向字母和 session ID 派生 IV/对称密钥，并在需要时扩展到目标长度。
     static func deriveKey(
         letter: UInt8, length: Int,
-        sharedSecretMPInt K: Data, exchangeHash H: Data, sessionID: Data
+        sharedSecretMPInt K: Data, exchangeDigest H: Data, sessionID: Data
     ) -> Data {
         var initialInput = Data()
         initialInput.append(K)
@@ -841,10 +841,10 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
         stage = "newkeys"
         sessionID = exchangeHash
-        let ivC2S = IntegratedSSHCrypto.deriveKey(letter: 0x41, length: 12, sharedSecretMPInt: kMPInt, exchangeHash: exchangeHash, sessionID: sessionID)
-        let ivS2C = IntegratedSSHCrypto.deriveKey(letter: 0x42, length: 12, sharedSecretMPInt: kMPInt, exchangeHash: exchangeHash, sessionID: sessionID)
-        let keyC2S = IntegratedSSHCrypto.deriveKey(letter: 0x43, length: 32, sharedSecretMPInt: kMPInt, exchangeHash: exchangeHash, sessionID: sessionID)
-        let keyS2C = IntegratedSSHCrypto.deriveKey(letter: 0x44, length: 32, sharedSecretMPInt: kMPInt, exchangeHash: exchangeHash, sessionID: sessionID)
+        let ivC2S = IntegratedSSHCrypto.deriveKey(letter: 0x41, length: 12, sharedSecretMPInt: kMPInt, exchangeDigest: exchangeHash, sessionID: sessionID)
+        let ivS2C = IntegratedSSHCrypto.deriveKey(letter: 0x42, length: 12, sharedSecretMPInt: kMPInt, exchangeDigest: exchangeHash, sessionID: sessionID)
+        let keyC2S = IntegratedSSHCrypto.deriveKey(letter: 0x43, length: 32, sharedSecretMPInt: kMPInt, exchangeDigest: exchangeHash, sessionID: sessionID)
+        let keyS2C = IntegratedSSHCrypto.deriveKey(letter: 0x44, length: 32, sharedSecretMPInt: kMPInt, exchangeDigest: exchangeHash, sessionID: sessionID)
 
         try await sendPacket(Data([Msg.newKeys]))
         _ = try await expect(Msg.newKeys)
