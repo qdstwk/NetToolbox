@@ -68,3 +68,32 @@ Rule: revision 2 is the sole audit target. Do not edit it during this audit pass
 
 ## Current disposition
 Revision 2 is a complete single-file integration candidate, but NOT security-approved. Critical/high findings must be fixed in a new revision only after the complete audit and normative cross-check are finished.
+## Normative pass 1 — KEX / key derivation / RSA / AES-GCM
+
+Audit target remains revision 2 commit 6e95a7120980797ff1c8c8c7635ea0b28187a665.
+
+### X25519 / curve25519-sha256
+- RFC 8731 requires peer Curve25519 public key length exactly 32 bytes and abort on an all-zero X25519 shared secret.
+- RFC 8731 section 3.1 explicitly says X25519 output bytes are reinterpreted as an unsigned fixed-length network-byte-order integer, then encoded as SSH mpint.
+- Current code does not explicitly enforce the all-zero rule and has no independent vector proving the SharedSecret raw-representation-to-mpint path. FIX REQUIRED.
+
+### SSH key derivation
+- RFC 4253 confirms A/B/C/D letter mapping used by the candidate: IV c2s=A, IV s2c=B, key c2s=C, key s2c=D.
+- RFC 4253 confirms extension HASH(K || H || key-so-far). Candidate structure matches this shape. PASS pending K encoding correctness.
+
+### Algorithm negotiation
+- RFC 4253 requires selection by iterating the client's preference list and choosing the first mutually supported compatible algorithm; membership testing is insufficient.
+- Current requireCiphers only tests contains(). FIX REQUIRED.
+
+### RSA verification
+- Apple Security exposes separate message and digest PKCS#1 v1.5 SHA-256 APIs.
+- Candidate passes exchange hash H into rsaSignatureMessagePKCS1v15SHA256/512. Because H is already the SSH signed digest input for RSA-SHA2 verification, this API choice would hash H as a message again. Replace with the corresponding rsaSignatureDigestPKCS1v15SHA256/512 path, after checking SecKeyIsAlgorithmSupported. FIX REQUIRED.
+
+### OpenSSH AES-GCM
+- OpenSSH documents aes*-gcm@openssh.com separately from the original RFC 5647 negotiation behavior and points to the OpenSSH-compatible AES-GCM rules.
+- OpenSSH cipher metadata confirms aes256-gcm uses 32-byte key, 12-byte IV, 16-byte auth tag and a 16-byte block size; packet/AAD/IV increment behavior still requires exact vector-level verification before approval.
+
+### Commenting requirement for Revision 3
+- Every security-relevant declaration, state field, protocol field, magic constant, guard, conversion, and state transition must carry a concise Chinese comment explaining purpose and failure/security meaning.
+- Closing braces and syntactically self-evident punctuation do not need noise comments.
+- Revision 3 will be generated only after the remaining normative passes are complete, so the commented repaired file is one coherent revision rather than a chain of moving partial fixes.
