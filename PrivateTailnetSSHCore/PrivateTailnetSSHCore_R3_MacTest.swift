@@ -816,7 +816,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
         case .trusted:
             break                                      // exact key match：允许进入 userauth
         case .firstUse(let presented):
-            throw SSHError.hostKeyConfirmationRequired(presented) // UI 确认并保存 pin 后重新连接
+            throw SSHError.hostKeyConfirmationRequired(&presented) // UI 确认并保存 pin 后重新连接
         case .changed:
             throw SSHError.hostKeyChanged              // key 变化绝不在本次连接中提供“继续”旁路
         }
