@@ -416,11 +416,20 @@ enum IntegratedSSHCrypto {
         letter: UInt8, length: Int,
         sharedSecretMPInt K: Data, exchangeHash H: Data, sessionID: Data
     ) -> Data {
-        var key = Data(SHA256.hash(data: K + H + Data([letter]) + sessionID))
+        var initialInput = Data()
+        initialInput.append(K)
+        initialInput.append(H)
+        initialInput.append(letter)
+        initialInput.append(sessionID)
+        var key = Data(SHA256.hash(data: initialInput))
         while key.count < length {
-            key.append(Data(SHA256.hash(data: K + H + key)))
+            var extensionInput = Data()
+            extensionInput.append(K)
+            extensionInput.append(H)
+            extensionInput.append(key)
+            key.append(Data(SHA256.hash(data: extensionInput)))
         }
-        return key.prefix(length)
+        return Data(key.prefix(length))
     }
 
     /// mpint magnitude bytes (strip leading zeros) for the shared secret, so
