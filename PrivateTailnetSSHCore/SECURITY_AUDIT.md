@@ -44,3 +44,47 @@ SSHAuth.password(String) and construction of the full userauth request necessari
 - concurrency/thread safety of mutable SSHClient state.
 - timeout behavior after initial TCP connect.
 - memory/resource DoS paths in banner/inbound/channel/SFTP buffers.
+
+
+## Trust-chain comparison — 2026-09-26
+
+### PTSSH-007 — X25519 shared-secret SSH encoding is not yet proven correct (BLOCKER)
+RFC 8731 section 3.1 requires the X25519 32-byte output to be interpreted as an unsigned fixed-length integer in network byte order and then encoded as SSH mpint. NetToolbox currently passes CryptoKit SharedSecret raw bytes directly to SSHCrypto.mpint(). The exact CryptoKit raw representation semantics must be proven with independent vectors before this path is approved. Do not infer correctness merely from interoperability.
+
+### PTSSH-008 — explicit RFC 8731 X25519 input/secret validation missing (HIGH)
+RFC 8731 requires received Curve25519 public keys to be exactly 32 bytes and requires abort on an all-zero computed shared secret. NetToolbox relies on CryptoKit construction/key-agreement failure but does not explicitly enforce both protocol requirements in its own SSH layer. Final core must fail closed and tests must cover malformed-length and low-order/all-zero cases.
+
+### PTSSH-009 — trust decision must occur before password authentication (CRITICAL invariant)
+RFC 4253 describes verification of K_S as server authentication and warns that accepting without verification makes the protocol insecure against active attacks. OpenSSH stores/checks known host keys and, on changed host identification, warns and disables password authentication. PrivateTailnetSSH will therefore enforce:
+1. verify the KEX signature cryptographically;
+2. derive/display the fingerprint from the exact host-key blob;
+3. compare exact host-key blob + key type against the pin for exact host:port;
+4. if first use, pause before userauth and require explicit user confirmation;
+5. if changed, abort before password construction/transmission;
+6. only after trust succeeds may ssh-userauth/password be constructed or sent.
+
+### PTSSH-010 — Rootshell trust policy is useful but not copied wholesale
+Rootshell provides persistent known-host records and exact public-key-data matching plus an in-memory accept-once path. These are useful behavioral references. Its persistence/sync model (SyncableFileStore/CloudKit integration) conflicts with PrivateTailnetSSH's local-only/no-cloud requirement and will not be copied. Its NIOSSHPublicKey delegate types also cannot enter the Playground core.
+
+### Adopted design for PrivateTailnetSSH host pin
+Persist locally:
+- canonical host string as entered/configured
+- port
+- host key algorithm/type
+- exact SSH host-key blob (Data/base64 representation)
+- SHA-256 fingerprint for display
+- first-seen timestamp (optional metadata)
+
+Security comparison uses exact key blob/type, not the display fingerprint string alone. Fingerprint is UI/verification aid.
+
+Changed key:
+- hard failure;
+- never silently replace pin;
+- never send password;
+- user must explicitly remove/reset the old pin through host management before a new first-use confirmation can occur.
+
+Not adopted from Rootshell:
+- CloudKit sync;
+- generic sync/tombstone machinery;
+- accept-once by default;
+- NIOSSH/Citadel/NIO transport types.
