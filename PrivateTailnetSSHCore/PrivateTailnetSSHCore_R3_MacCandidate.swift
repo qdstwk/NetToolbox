@@ -126,12 +126,22 @@ enum SSHHostTrust {
 // MARK: - SSHTCPConnection
 
 // [ANNOTATION] TCP/目的地址门禁层的错误集合，与更高层 SSH 协议错误分开。
-enum SSHTransportError: Error, Sendable, Equatable {
+enum SSHTransportError: LocalizedError, Sendable, Equatable {
     case invalidEndpoint
     case destinationOutsideTailnet          // 目标不是允许的 Tailnet IPv4：在创建 socket 前拒绝
     case timeout
     case connection(String)
     case closed
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidEndpoint: return "Invalid TCP endpoint"
+        case .destinationOutsideTailnet: return "Destination is outside the allowed Tailnet IPv4 range"
+        case .timeout: return "TCP connection timed out"
+        case .connection(let message): return "TCP connection failed: \(message)"
+        case .closed: return "TCP connection closed"
+        }
+    }
 }
 
 // [ANNOTATION] 线程安全的一次性 continuation 容器，保证多个 NWConnection 状态回调只能完成等待者一次。
@@ -221,8 +231,11 @@ final class SSHTCPConnection: @unchecked Sendable {
                 switch state {
                 case .ready:
                     if settled.claim() { shot.resume(.success(())) }
-                case .failed(let error), .waiting(let error):
-                    if settled.claim() { shot.resume(.failure(.connection(error.localizedDescription))) }
+                case .waiting:
+                    // NWConnection.waiting is recoverable; let .ready/.failed/.cancelled or timeout decide.
+                    break
+                case .failed(let error):
+                    if settled.claim() { shot.resume(.failure(.connection(String(reflecting: error)))) }
                 case .cancelled:
                     if settled.claim() { shot.resume(.failure(.closed)) }
                 default: break
