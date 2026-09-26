@@ -470,7 +470,9 @@ struct IntegratedSSHGCMCipher {
         self.counter = iv.dropFirst(4).prefix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
     }
 
-    private mutating func nextNonce() -> Data {
+    private mutating func nextNonce() throws -> Data {
+        // AES-GCM 的同一 key 下绝不能重复 nonce；计数器耗尽时必须终止而不是回绕。
+        guard counter != UInt64.max else { throw SSHError.encryptFailed }
         var nonce = Data(fixed)
         var value = counter
         var tail = [UInt8](repeating: 0, count: 8)
@@ -478,7 +480,7 @@ struct IntegratedSSHGCMCipher {
             tail[index] = UInt8(value & 0xFF); value >>= 8
         }
         nonce.append(contentsOf: tail)
-        counter &+= 1
+        counter += 1
         return nonce
     }
 
@@ -487,7 +489,7 @@ struct IntegratedSSHGCMCipher {
     mutating func seal(plaintext: Data, lengthField: Data) -> Data? {
         guard let box = try? AES.GCM.seal(
             plaintext, using: key,
-            nonce: try AES.GCM.Nonce(data: nextNonce()),
+            nonce: try AES.GCM.Nonce(data: try nextNonce()),
             authenticating: lengthField
         ) else { return nil }
         return box.ciphertext + box.tag
@@ -496,7 +498,7 @@ struct IntegratedSSHGCMCipher {
     /// Opens `ciphertext` + 16-byte `tag` authenticated by `lengthField`.
     mutating func open(ciphertext: Data, tag: Data, lengthField: Data) -> Data? {
         guard let box = try? AES.GCM.SealedBox(
-            nonce: try AES.GCM.Nonce(data: nextNonce()),
+            nonce: try AES.GCM.Nonce(data: try nextNonce()),
             ciphertext: ciphertext, tag: tag
         ) else { return nil }
         return try? AES.GCM.open(box, using: key, authenticating: lengthField)
@@ -557,7 +559,7 @@ enum SSHError: LocalizedError {
 }
 
 /// A minimal SSH-2 client (curve25519-sha256 + aes256-gcm@openssh.com;
-/// password or public-key auth — ed25519, ECDSA nistp256/384/521, and RSA),
+/// password authentication only; host-key verification supports the algorithms listed below.
 /// built entirely on CryptoKit/Security so the package keeps zero external
 /// dependencies. Supports one-shot exec and a line-oriented interactive shell.
 final class IntegratedSSHClient: @unchecked Sendable {
@@ -710,7 +712,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
         try await authenticate(username: username, auth: auth)
     }
 
-    /// Password or ed25519 public-key user authentication.
+    /// 密码认证：只有在 KEX 签名验证和 Host Key pin 检查全部通过后才会进入这里。
     private func authenticate(username: String, auth: SSHAuth) async throws {
         var request = Data([Msg.userauthRequest])
         IntegratedSSHWire.putString(username, into: &request)
