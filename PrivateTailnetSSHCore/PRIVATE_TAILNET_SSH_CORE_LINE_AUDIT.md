@@ -202,3 +202,26 @@ Residuals to keep visible during testing/security follow-up:
 - Therefore the complete security boundary is layered: destination range gate + OS Tailscale routing + tailnet Grants + SSH cryptographic host-key pin.
 - The app must never treat the numeric-range check alone as authentication.
 - Tailscale also supports IPv6 fd7a:115c:a1e0::/48, but R3 intentionally rejects IPv6 to keep the first policy narrow. Add only if the deployment later needs it.
+## R3 security closeout for on-demand short sessions
+
+Target: PrivateTailnetSSHCore_R3.swift @ f7c3084d415b01cbf35bf691a3f36e477552f0bc.
+
+### Final static gate
+- Imports: Foundation, Network, CryptoKit, Security only.
+- No external package import.
+- No UserDefaults/Keychain/SecItem/clipboard/CloudKit/logging path for the SSH password was found.
+- The automated broad danger-pattern scan produced only false positives from the substring print inside fingerprint; no print() logging call is present.
+- Destination is checked twice against canonical 100.64.0.0/10 before NWConnection creation.
+- Host-key cryptographic signature must be true before host trust evaluation.
+- First use exits with hostKeyConfirmationRequired before authenticate().
+- Changed pin exits with hostKeyChanged before authenticate().
+- authenticate() is reached only after the exact trust decision succeeds.
+- Outbound AES-GCM packet sends are serialized by SSHSendGate and the nonce counter cannot wrap.
+
+### Session-lifetime decision
+- This application is an on-demand administration client, not a continuously connected SSH daemon/terminal.
+- Missing rekey remains a known limitation, but is not a blocker for the first short-lived interoperability test.
+- Sessions should be explicitly closed when the user exits the terminal/command view; the app should not intentionally keep an idle SSH connection alive in the background.
+
+### Status
+R3 passes the current pre-password static security gate for a short-lived real-device interoperability test. This is not a claim of formal verification or absence of runtime bugs. Runtime testing must still verify that first-use confirmation occurs before password entry/transmission, changed-key refusal works, and the actual HP-NAS/OpenSSH handshake succeeds.
