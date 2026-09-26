@@ -748,7 +748,14 @@ final class IntegratedSSHClient: @unchecked Sendable {
             IntegratedSSHWire.putString(password, into: &request)
         
         }
-        try await sendPacket(request)
+        // sendPacket 返回后立即尽力擦除包含明文密码的临时 Data；Swift String 本身仍无法保证零化。
+        do {
+            try await sendPacket(request)
+        } catch {
+            request.resetBytes(in: 0..<request.count)
+            throw error
+        }
+        request.resetBytes(in: 0..<request.count)
 
         while true {
             let payload = try await nextPayload()
