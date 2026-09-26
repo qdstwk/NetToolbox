@@ -310,7 +310,7 @@ enum IntegratedSSHWire {
     /// the value is never misread as negative; zero encodes as empty.
 // [ANNOTATION] 按 RFC 4251 编码正 mpint：去掉多余前导零，必要时补 0x00 防止最高位被解释为负数。
     static func putMPInt(_ magnitude: Data, into input: Data) -> Data {
-        var data = input
+        let data = input
         var bytes = Array(magnitude)
         while bytes.first == 0 { bytes.removeFirst() }   // strip leading zeros
         if bytes.isEmpty {
