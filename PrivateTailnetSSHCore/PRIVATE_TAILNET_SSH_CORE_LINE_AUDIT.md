@@ -145,3 +145,30 @@ Per project decision, pre-runtime review now prioritizes security properties ove
 - non-security compatibility with uncommon algorithms/servers.
 
 Revision 3 should therefore be a security-hardened runnable candidate, not an attempt to pre-fix every possible SSH interoperability bug.
+## Security confirmation pass — X25519 and OpenSSH AES-GCM
+
+### X25519 shared-secret encoding: CONFIRMED
+- RFC 8731 section 3.1 is unusually explicit: although X25519 internally defines fixed-length little-endian integer encodings, the 32-byte X output is REINTERPRETED by SSH as an unsigned fixed-length NETWORK-BYTE-ORDER integer and then encoded as SSH mpint. The SSH layer does not reverse X before mpint encoding.
+- Apple SwiftNIO SSH independently implements the same rule in EllipticCurveKeyExchange.swift. Its updateAsMPInt(sharedSecret:) consumes SharedSecret bytes in their existing order, strips only SSH-mpint leading zeroes, and prepends a zero byte only when needed to keep the mpint positive. This independently corroborates the NetToolbox/Revision-3 byte-order approach.
+- Revision 3 additionally enforces 32-byte server X25519 public key and all-zero shared-secret rejection.
+- Therefore the previous byte-order BLOCKER is CLOSED. Keep the direct SharedSecret bytes -> SSH positive mpint transformation; do NOT reverse the bytes.
+
+### aes256-gcm@openssh.com packet construction: CONFIRMED
+- RFC 5647 section 7 defines a 12-byte IV as 4-byte fixed || 8-byte invocation_counter, incremented after each packet invocation.
+- RFC 5647 defines PT exactly as padding_length || payload || random_padding; packet_length is the 4-byte AAD; output is packet_length || ciphertext || full 16-byte tag.
+- PT must be a multiple of AES block size 16 and random padding must be 4..255 bytes.
+- OpenSSH portable cipher.c independently confirms aad bytes are copied unencrypted, authenticated, ciphertext begins after aad, and the auth tag follows ciphertext.
+- OpenSSH PROTOCOL confirms aes256-gcm@openssh.com uses the RFC 5647 construction but changes negotiation: it appears only as a cipher; when selected, MAC negotiation is ignored and no matching MAC is required.
+- Revision 3 framing matches these security-critical rules: 4-byte length AAD, encrypted padding_length+payload+padding, 16-byte tag, 12-byte nonce split 4+8, and no counter wrap.
+- Therefore the previous AES-GCM framing BLOCKER is CLOSED.
+
+### Community/reference implementation search
+- Rootshell remains useful for host-trust/session policy but not as a zero-dependency transport because it uses NIO/Citadel.
+- Apple SwiftNIO SSH is the strongest Swift reference found for X25519/SSH mpint behavior and fail-closed exchange-hash signature verification, despite being unsuitable as a Playground runtime dependency.
+- OpenSSH portable is used as the interoperability/security oracle for aes*-gcm@openssh.com framing/negotiation.
+- AsyncSSH community traces independently show real deployments negotiating curve25519-sha256 + aes256-gcm@openssh.com with the MAC treated as implicit, supporting the same model.
+
+### Remaining pre-password security work
+- Compute and bind the exact negotiated host-key algorithm, including rsa-sha2-256/512 mapping to an ssh-rsa public-key blob, rather than merely accepting any supported host-key blob after membership checks.
+- Remove or serialize any possibility of concurrent mutation of outbound cipher state. Inbound and outbound GCM counters are separate, but multiple concurrent sendPacket calls must never race the outbound counter.
+- Re-scan all untrusted length/allocation paths and password/log/persistence paths after those changes.
