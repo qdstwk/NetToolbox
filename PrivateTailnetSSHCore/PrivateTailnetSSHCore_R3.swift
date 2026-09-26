@@ -116,6 +116,7 @@ enum SSHHostTrust {
 
 enum SSHTransportError: Error, Sendable, Equatable {
     case invalidEndpoint
+    case destinationOutsideTailnet          // 目标不是允许的 Tailnet IPv4：在创建 socket 前拒绝
     case timeout
     case connection(String)
     case closed
@@ -145,6 +146,34 @@ private final class SSHAtomicFlag: @unchecked Sendable {
     }
 }
 
+/// Tailnet-only 出站策略。
+/// 当前版本故意只接受 Tailscale 默认 IPv4 CGNAT 段 100.64.0.0/10。
+/// 注意：100.64/10 本身并不能证明“属于我们的 tailnet”；真正的授权边界仍由 Tailscale Grants + Host Key pin 提供。
+enum SSHTailnetDestinationPolicy {
+    static func canonicalIPv4(_ input: String) -> String? {
+        let parts = input.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return nil }
+        var octets: [UInt8] = []
+        octets.reserveCapacity(4)
+        for part in parts {
+            // 只接受十进制规范 IPv4；拒绝空段、符号、十六进制和可能产生歧义的前导零。
+            guard !part.isEmpty, part.allSatisfy({ $0.isNumber }),
+                  part.count == 1 || part.first != "0",
+                  let value = UInt8(part) else { return nil }
+            octets.append(value)
+        }
+        return octets.map(String.init).joined(separator: ".")
+    }
+
+    static func allows(_ host: String) -> Bool {
+        guard let ip = canonicalIPv4(host) else { return false } // 域名/IPv6/LAN/public IPv4 一律拒绝
+        let o = ip.split(separator: ".").compactMap { UInt8($0) }
+        guard o.count == 4 else { return false }
+        // 100.64.0.0/10：首字节必须 100，第二字节高两位必须为 01，即 64...127。
+        return o[0] == 100 && (64...127).contains(o[1])
+    }
+}
+
 /// Long-lived TCP byte stream for the SSH transport.
 /// Deliberately uses Network.framework directly: no NIO/Citadel/C target.
 final class SSHTCPConnection: @unchecked Sendable {
@@ -153,8 +182,11 @@ final class SSHTCPConnection: @unchecked Sendable {
 
     init?(host: String, port: UInt16) {
         let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !h.isEmpty, let p = NWEndpoint.Port(rawValue: port) else { return nil }
-        connection = NWConnection(host: NWEndpoint.Host(h), port: p, using: .tcp)
+        // 第一层硬门禁：不允许 DNS，也不允许普通 LAN/公网地址进入 NWConnection。
+        guard SSHTailnetDestinationPolicy.allows(h),
+              let canonical = SSHTailnetDestinationPolicy.canonicalIPv4(h),
+              let p = NWEndpoint.Port(rawValue: port) else { return nil }
+        connection = NWConnection(host: NWEndpoint.Host(canonical), port: p, using: .tcp)
     }
 
     func open(timeout: Double) async -> Result<Void, SSHTransportError> {
@@ -627,9 +659,13 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
     init?(host: String, port: UInt16, pinnedHostKey: PinnedSSHHostKey? = nil) {
         // 只接受能够建立明确 TCP endpoint 的主机；pin 与原始 host+port 一起绑定。
-        guard let connection = SSHTCPConnection(host: host, port: port) else { return nil }
+        let requestedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 第二层门禁：Client 自身也拒绝非 Tailnet IPv4，避免未来替换 transport 时绕过策略。
+        guard SSHTailnetDestinationPolicy.allows(requestedHost),
+              let canonicalHost = SSHTailnetDestinationPolicy.canonicalIPv4(requestedHost),
+              let connection = SSHTCPConnection(host: canonicalHost, port: port) else { return nil }
         self.connection = connection
-        self.host = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.host = canonicalHost
         self.port = port
         self.pinnedHostKey = pinnedHostKey
     }
