@@ -49,8 +49,7 @@ enum SSHError: LocalizedError {
 /// A minimal SSH-2 client (curve25519-sha256 + aes256-gcm@openssh.com;
 /// password or public-key auth — ed25519, ECDSA nistp256/384/521, and RSA),
 /// built entirely on CryptoKit/Security so the package keeps zero external
-/// dependencies. Supports one-shot exec, SFTP directory listing / download,
-/// and a line-oriented interactive shell.
+/// dependencies. Supports one-shot exec and a line-oriented interactive shell.
 final class IntegratedSSHClient: @unchecked Sendable {
     private enum Msg {
         static let disconnect: UInt8 = 1
@@ -100,7 +99,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
     func close() { connection.cancel() }
 
-    // MARK: - Handshake (shared by exec, SFTP and shell)
+    // MARK: - Handshake (shared by exec and shell)
 
     /// Runs the full transport handshake and user authentication, leaving the
     /// GCM ciphers active and the session ready for channel operations. Does
