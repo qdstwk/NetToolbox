@@ -812,11 +812,19 @@ final class IntegratedSSHClient: @unchecked Sendable {
         guard negotiatedSigReader.readStringUTF8() == negotiatedHostKeyAlgorithm else { throw SSHError.invalidHostKeySignature }
         fingerprint = PinnedSSHHostKey.sha256Fingerprint(of: hostKey)
         // 安全边界 2：在构造任何密码认证包之前完成 TOFU/pin 决策。
-        switch SSHHostTrust.evaluate(host: host, port: port, keyType: hostKeyTypeName, keyBlob: hostKey, pinned: pinnedHostKey) {
+        let trustDecision = SSHHostTrust.evaluate(
+            host: host,
+            port: port,
+            keyType: hostKeyTypeName,
+            keyBlob: hostKey,
+            pinned: pinnedHostKey
+        )
+        switch trustDecision {
         case .trusted:
             break                                      // exact key match：允许进入 userauth
         case .firstUse(let presented):
-            throw SSHError.untrustedHostKey(presented) // UI 确认并保存 pin 后重新连接
+            let confirmationError: SSHError = .untrustedHostKey(presented)
+            throw confirmationError                    // UI 确认并保存 pin 后重新连接
         case .changed:
             throw SSHError.hostKeyChanged              // key 变化绝不在本次连接中提供“继续”旁路
         }
