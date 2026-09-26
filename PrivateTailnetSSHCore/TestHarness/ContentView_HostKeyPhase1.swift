@@ -83,7 +83,7 @@ struct ContentView: View {
         } catch SSHError.invalidHostKeySignature {
             status = "FAIL: server Host Key signature verification failed."
         } catch {
-            status = "FAIL at Core stage: \(client.stage)\n\(error.localizedDescription)"
+            status = "FAIL at Core stage: \(client.stage)\nRaw error: \(String(reflecting: error))\nLocalized: \(error.localizedDescription)"
         }
     }
 }
