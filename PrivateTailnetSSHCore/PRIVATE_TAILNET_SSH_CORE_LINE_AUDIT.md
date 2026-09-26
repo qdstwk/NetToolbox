@@ -189,3 +189,16 @@ Residuals to keep visible during testing/security follow-up:
 - Long-lived shell rekey is not yet implemented; do not treat R3 as a finished general-purpose SSH client until rekey policy is added/tested.
 - Functional/channel bugs remain intentionally deferred to live testing unless they reveal a security impact.
 - Tailnet-only destination enforcement is an application policy decision above the SSH core; the core itself accepts any host string supplied by its caller.
+## Tailnet-only egress boundary — Revision 3
+- Current R3 commit: f7c3084d415b01cbf35bf691a3f36e477552f0bc.
+- Added SSHTailnetDestinationPolicy before NWConnection construction.
+- Current policy accepts ONLY canonical decimal IPv4 in 100.64.0.0/10.
+- Public IPv4, RFC1918 LAN IPv4, IPv6, DNS names, MagicDNS names, localhost and malformed/ambiguous IPv4 spellings are rejected before socket creation.
+- The check is duplicated at IntegratedSSHClient initialization and SSHTCPConnection initialization so a future transport refactor is less likely to bypass the boundary.
+- This deliberately sacrifices MagicDNS convenience for a smaller attack surface in the first version.
+
+### Important limitation
+- 100.64.0.0/10 is RFC 6598 Shared Address Space and is not cryptographic proof that an address belongs to this user's tailnet. Tailscale uses this range for device IPv4 addresses, but ISPs/other VPNs may also use it.
+- Therefore the complete security boundary is layered: destination range gate + OS Tailscale routing + tailnet Grants + SSH cryptographic host-key pin.
+- The app must never treat the numeric-range check alone as authentication.
+- Tailscale also supports IPv6 fd7a:115c:a1e0::/48, but R3 intentionally rejects IPv6 to keep the first policy narrow. Add only if the deployment later needs it.
