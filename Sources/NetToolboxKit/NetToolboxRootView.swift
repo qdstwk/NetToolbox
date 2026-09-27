@@ -94,6 +94,7 @@ public struct NetToolboxRootView: View {
             .onChange(of: scenePhase) { _, phase in
                 lifecycleGeneration &+= 1
                 let generation = lifecycleGeneration
+                UnifiedNetworkInterface.setForegroundActiveImmediately(phase == .active, generation: generation)
                 Task {
                     // Security rule: the instant the app is no longer ACTIVE
                     // (Control Center, app switcher, another app, lock screen,
