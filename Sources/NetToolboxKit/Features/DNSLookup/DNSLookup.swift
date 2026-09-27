@@ -8,10 +8,14 @@ protocol DNSResolving: Sendable {
 
 struct UDPDNSResolver: DNSResolving {
     func resolve(name: String, type: DNSRecordType, server: String) async throws -> [DNSRecord] {
+        try await resolve(name: name, type: type, server: server, cancellation: nil)
+    }
+
+    func resolve(name: String, type: DNSRecordType, server: String, cancellation: NetworkCancellationHandle?) async throws -> [DNSRecord] {
         // A fixed ID is fine: each query uses its own short-lived socket.
         let query = try DNSMessage.encodeQuery(name: name, type: type, id: 0x1234)
         let response = await UDPExchange.request(
-            host: server, port: 53, payload: query, timeout: 5
+            host: server, port: 53, payload: query, timeout: 5, cancellation: cancellation
         )
         switch response {
         case .success(let data):
@@ -57,8 +61,15 @@ final class DNSLookupViewModel {
             output = .failure(error.localizedDescription)
             return
         }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         do {
-            let records = try await resolver.resolve(name: trimmed, type: type, server: server)
+            let records: [DNSRecord]
+            if let udp = resolver as? UDPDNSResolver {
+                records = try await udp.resolve(name: trimmed, type: type, server: server, cancellation: cancellation)
+            } else {
+                records = try await resolver.resolve(name: trimmed, type: type, server: server)
+            }
             output = .success(records)
         } catch {
             output = .failure(error.localizedDescription)
