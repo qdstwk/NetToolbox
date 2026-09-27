@@ -79,6 +79,13 @@ final class HTTPHeadersViewModel {
         let trimmed = urlString.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { output = .idle; return }
         output = .loading
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "http-headers", target: trimmed)
+        } catch {
+            output = .failure(error.localizedDescription)
+            return
+        }
         do {
             output = .success(try await service.inspect(trimmed))
         } catch {
