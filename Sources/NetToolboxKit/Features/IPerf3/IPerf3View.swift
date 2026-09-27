@@ -58,10 +58,10 @@ final class IPerf3ViewModel {
         client.start()
     }
 
-    func stop() {
+    func stop() async {
         client?.cancel()
         client = nil
-        releaseLease()
+        await releaseLease()
         if isRunning { phase = .idle }
     }
 
@@ -72,7 +72,7 @@ final class IPerf3ViewModel {
         case .finished(let mbps, let bytes, let seconds):
             phase = .finished(mbps: mbps, bytes: bytes, seconds: seconds)
             client = nil
-            releaseLease()
+            Task { await releaseLease() }
         case .failed(let message):
             phase = .failed(message)
             client = nil
@@ -80,10 +80,10 @@ final class IPerf3ViewModel {
         }
     }
 
-    private func releaseLease() {
+    private func releaseLease() async {
         guard let lease = networkLease else { return }
         networkLease = nil
-        Task { await UnifiedNetworkInterface.release(lease) }
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
@@ -179,7 +179,7 @@ struct IPerf3View: View {
 
             if viewModel.isRunning {
                 Button(role: .destructive) {
-                    viewModel.stop()
+                    Task { await viewModel.stop() }
                 } label: {
                     Label(L10nString("iperf3.action.stop"), systemImage: "stop.fill")
                         .font(AppTypography.headline)
