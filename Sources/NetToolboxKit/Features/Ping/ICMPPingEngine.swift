@@ -43,19 +43,21 @@ enum ICMPPingEngine {
     }
 
     static func ping(
-        target: Target, sequence: Int, ttl: Int, payloadSize: Int, timeout: Double
+        target: Target, sequence: Int, ttl: Int, payloadSize: Int, timeout: Double,
+        cancellation: NetworkCancellationHandle? = nil
     ) async -> Reply {
         await withCheckedContinuation { continuation in
             let shot = OneShot(continuation)
             DispatchQueue.global(qos: .userInitiated).async {
-                shot.resume(blockingPing(target: target, sequence: sequence, ttl: ttl, payloadSize: payloadSize, timeout: timeout))
+                shot.resume(blockingPing(target: target, sequence: sequence, ttl: ttl, payloadSize: payloadSize, timeout: timeout, cancellation: cancellation))
             }
         }
     }
 
     #if canImport(Darwin)
     private static func blockingPing(
-        target: Target, sequence: Int, ttl: Int, payloadSize: Int, timeout: Double
+        target: Target, sequence: Int, ttl: Int, payloadSize: Int, timeout: Double,
+        cancellation: NetworkCancellationHandle?
     ) -> Reply {
         let totalBytes = 8 + max(0, payloadSize)
         func fail() -> Reply { Reply(sequence: sequence, milliseconds: nil, bytes: totalBytes) }
@@ -71,7 +73,10 @@ enum ICMPPingEngine {
 
             let fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6)
             guard fd >= 0 else { return fail() }
-            defer { close(fd) }
+            let socketOwner = SocketOwner(fd)
+            defer { socketOwner.closeIfOpen(); cancellation?.clear() }
+            cancellation?.install { socketOwner.cancel() }
+            if cancellation?.isCancelled == true { return fail() }
 
             var hops = Int32(ttl)
             _ = setsockopt(fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS, &hops, socklen_t(MemoryLayout<Int32>.size))
@@ -104,7 +109,10 @@ enum ICMPPingEngine {
 
             let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
             guard fd >= 0 else { return fail() }
-            defer { close(fd) }
+            let socketOwner = SocketOwner(fd)
+            defer { socketOwner.closeIfOpen(); cancellation?.clear() }
+            cancellation?.install { socketOwner.cancel() }
+            if cancellation?.isCancelled == true { return fail() }
 
             var ttlValue = Int32(ttl)
             _ = setsockopt(fd, IPPROTO_IP, IP_TTL, &ttlValue, socklen_t(MemoryLayout<Int32>.size))
@@ -128,6 +136,20 @@ enum ICMPPingEngine {
         }
     }
 
+    private final class SocketOwner: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fd: Int32?
+        init(_ fd: Int32) { self.fd = fd }
+        func cancel() {
+            lock.lock()
+            let value = fd
+            fd = nil
+            lock.unlock()
+            if let value { close(value) }
+        }
+        func closeIfOpen() { cancel() }
+    }
+
     private static func setTimeout(_ fd: Int32, _ timeout: Double) {
         var tv = timeval(tv_sec: Int(timeout), tv_usec: Int32((timeout - Double(Int(timeout))) * 1_000_000))
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
@@ -139,7 +161,7 @@ enum ICMPPingEngine {
             + Double(elapsed.components.attoseconds) / 1_000_000_000_000_000
     }
     #else
-    private static func blockingPing(target: Target, sequence: Int, ttl: Int, payloadSize: Int, timeout: Double) -> Reply {
+    private static func blockingPing(target: Target, sequence: Int, ttl: Int, payloadSize: Int, timeout: Double, cancellation: NetworkCancellationHandle?) -> Reply {
         Reply(sequence: sequence, milliseconds: nil, bytes: 8 + max(0, payloadSize))
     }
     #endif
