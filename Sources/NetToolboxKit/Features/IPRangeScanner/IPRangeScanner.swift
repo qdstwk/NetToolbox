@@ -57,24 +57,27 @@ enum IPRangeScanner {
 
 /// Pings a single IPv4 host over ICMP.
 enum ICMPHostPinger {
-    static func probe(ip: String, timeout: Double) async -> Double? {
+    static func probe(ip: String, timeout: Double, cancellation: NetworkCancellationHandle) async -> Double? {
         await withCheckedContinuation { continuation in
             let shot = OneShot(continuation)
             DispatchQueue.global(qos: .userInitiated).async {
-                shot.resume(blockingPing(ip: ip, timeout: timeout))
+                shot.resume(blockingPing(ip: ip, timeout: timeout, cancellation: cancellation))
             }
         }
     }
 
     #if canImport(Darwin)
-    private static func blockingPing(ip: String, timeout: Double) -> Double? {
+    private static func blockingPing(ip: String, timeout: Double, cancellation: NetworkCancellationHandle) -> Double? {
         var address = sockaddr_in()
         address.sin_family = sa_family_t(AF_INET)
         guard ip.withCString({ inet_pton(AF_INET, $0, &address.sin_addr) }) == 1 else { return nil }
 
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
         guard fd >= 0 else { return nil }
-        defer { close(fd) }
+        let owner = RangeSocketOwner(fd)
+        defer { owner.cancel(); cancellation.clear() }
+        cancellation.install { owner.cancel() }
+        if cancellation.isCancelled { return nil }
 
         var tv = timeval(tv_sec: Int(timeout), tv_usec: Int32((timeout - Double(Int(timeout))) * 1_000_000))
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
@@ -101,8 +104,13 @@ enum ICMPHostPinger {
         return Double(elapsed.components.seconds) * 1000
             + Double(elapsed.components.attoseconds) / 1_000_000_000_000_000
     }
+    private final class RangeSocketOwner: @unchecked Sendable {
+        private let lock = NSLock(); private var fd: Int32?
+        init(_ fd: Int32) { self.fd = fd }
+        func cancel() { lock.lock(); let v = fd; fd = nil; lock.unlock(); if let v { close(v) } }
+    }
     #else
-    private static func blockingPing(ip: String, timeout: Double) -> Double? { nil }
+    private static func blockingPing(ip: String, timeout: Double, cancellation: NetworkCancellationHandle) -> Double? { nil }
     #endif
 }
 
@@ -144,12 +152,15 @@ final class IPRangeScannerViewModel {
         do { lease = try await UnifiedNetworkInterface.claim(operation: "ip-range-scan", target: cidr) }
         catch { errorMessage = error.localizedDescription; isScanning = false; return }
 
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
+
         // Strict single-line policy: one host, one probe method, at a time.
         for ip in hosts {
             guard isScanning else { break }
-            var rtt = await ICMPHostPinger.probe(ip: ip, timeout: 0.9)
+            var rtt = await ICMPHostPinger.probe(ip: ip, timeout: 0.9, cancellation: cancellation)
             if rtt == nil {
-                rtt = await TCPHostProbe.probe(ip: ip, timeout: 0.9)
+                rtt = await TCPHostProbe.probe(ip: ip, timeout: 0.9, cancellation: cancellation)
             }
             scanned += 1
             if let rtt {
