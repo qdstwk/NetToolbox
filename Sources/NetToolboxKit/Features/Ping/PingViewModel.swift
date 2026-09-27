@@ -36,6 +36,7 @@ final class PingViewModel {
     private(set) var errorMessage: String?
     /// This tool's own recent-runs log (newest first), kept while the app runs.
     private(set) var history: [String] = []
+    private var currentCancellation: NetworkCancellationHandle?
 
     /// Set once by the view so a running operation can flag itself in the
     /// sidebar even after you navigate away.
@@ -60,22 +61,26 @@ final class PingViewModel {
         resolvedIP = nil
         usingTCPFallback = false
 
-        guard let resolved = ICMPPingEngine.resolve(host: target, preferIPv6: preferIPv6) else {
-            errorMessage = L10nString("ping.error.resolve")
-            isRunning = false
-            return
-        }
-        resolvedIP = resolved.ip
-
         let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await UnifiedNetworkInterface.claim(operation: "ping", target: resolved.ip)
+            lease = try await UnifiedNetworkInterface.claim(operation: "ping", target: target)
         } catch {
             errorMessage = error.localizedDescription
             isRunning = false
             return
         }
-        defer { Task { await UnifiedNetworkInterface.release(lease) } }
+        let cancellation = NetworkCancellationHandle()
+        currentCancellation = cancellation
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
+
+        guard let resolved = ICMPPingEngine.resolve(host: target, preferIPv6: preferIPv6) else {
+            errorMessage = L10nString("ping.error.resolve")
+            currentCancellation = nil
+            await UnifiedNetworkInterface.release(lease)
+            isRunning = false
+            return
+        }
+        resolvedIP = resolved.ip
 
         let tcpPinger = TCPPingService()
         var useICMP = true
@@ -86,7 +91,8 @@ final class PingViewModel {
             var milliseconds: Double?
             if useICMP {
                 let reply = await ICMPPingEngine.ping(
-                    target: resolved, sequence: sequence, ttl: ttl, payloadSize: payload, timeout: timeout
+                    target: resolved, sequence: sequence, ttl: ttl, payloadSize: payload, timeout: timeout,
+                    cancellation: cancellation
                 )
                 milliseconds = reply.milliseconds
                 // If the very first ICMP echo goes unanswered the network is
@@ -98,7 +104,7 @@ final class PingViewModel {
                 }
             }
             if milliseconds == nil {
-                let tcp = await tcpPinger.attempt(host: resolved.ip, port: fallbackPort, timeout: timeout)
+                let tcp = await tcpPinger.attempt(host: resolved.ip, port: fallbackPort, timeout: timeout, cancellation: cancellation)
                 milliseconds = tcp.milliseconds
             }
             collected.append(PingAttempt(sequence: sequence, milliseconds: milliseconds))
@@ -108,6 +114,8 @@ final class PingViewModel {
                 try? await Task.sleep(for: .seconds(interval))
             }
         }
+        currentCancellation = nil
+        await UnifiedNetworkInterface.release(lease)
         isRunning = false
 
         if let summary {
@@ -118,6 +126,7 @@ final class PingViewModel {
     }
 
     func stop() {
+        currentCancellation?.cancel()
         isRunning = false
     }
 }
