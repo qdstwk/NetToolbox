@@ -581,9 +581,8 @@ struct IntegratedSSHGCMCipher {
     }
 
 // [ANNOTATION] 按 OpenSSH AES-GCM 约定推进 64 位 invocation counter；禁止溢出回绕以避免 nonce 重用。
-    private mutating func nextNonce() throws -> Data {
-        // AES-GCM 的同一 key 下绝不能重复 nonce；计数器耗尽时必须终止而不是回绕。
-        guard counter != UInt64.max else { throw SSHError.encryptFailed }
+    private func currentNonce() throws -> Data {
+        // counter == UInt64.max 仍是一个尚未使用的合法 nonce；成功使用后才进入耗尽状态。
         var nonce = Data(fixed)
         var value = counter
         var tail = [UInt8](repeating: 0, count: 8)
@@ -591,30 +590,39 @@ struct IntegratedSSHGCMCipher {
             tail[index] = UInt8(value & 0xFF); value >>= 8
         }
         nonce.append(contentsOf: tail)
-        counter += 1
         return nonce
+    }
+
+    private mutating func advanceNonceAfterSuccess() throws {
+        // 禁止成功使用最后一个 nonce 后回绕到 0；当前连接必须终止/重新协商。
+        guard counter != UInt64.max else { throw SSHError.encryptFailed }
+        counter += 1
     }
 
     /// Seals `plaintext` (padding_length || payload || padding) with the
     /// 4-byte `lengthField` as additional data. Returns ciphertext || tag.
 // [ANNOTATION] 使用当前 AES-GCM nonce 加密一个 SSH packet body，并把 4 字节 packet_length 作为 AAD；成功后只前进一次 nonce。
     mutating func seal(plaintext: Data, lengthField: Data) -> Data? {
-        guard let box = try? AES.GCM.seal(
-            plaintext, using: key,
-            nonce: try AES.GCM.Nonce(data: try nextNonce()),
-            authenticating: lengthField
-        ) else { return nil }
+        guard let nonceData = try? currentNonce(),
+              let nonce = try? AES.GCM.Nonce(data: nonceData),
+              let box = try? AES.GCM.seal(
+                plaintext, using: key, nonce: nonce, authenticating: lengthField
+              ),
+              (try? advanceNonceAfterSuccess()) != nil else { return nil }
         return box.ciphertext + box.tag
     }
 
     /// Opens `ciphertext` + 16-byte `tag` authenticated by `lengthField`.
 // [ANNOTATION] 使用当前 AES-GCM nonce 验证并解密服务器 packet；认证失败不会返回明文，并且 nonce 只在成功后推进。
     mutating func open(ciphertext: Data, tag: Data, lengthField: Data) -> Data? {
-        guard let box = try? AES.GCM.SealedBox(
-            nonce: try AES.GCM.Nonce(data: try nextNonce()),
-            ciphertext: ciphertext, tag: tag
-        ) else { return nil }
-        return try? AES.GCM.open(box, using: key, authenticating: lengthField)
+        guard let nonceData = try? currentNonce(),
+              let nonce = try? AES.GCM.Nonce(data: nonceData),
+              let box = try? AES.GCM.SealedBox(
+                nonce: nonce, ciphertext: ciphertext, tag: tag
+              ),
+              let plaintext = try? AES.GCM.open(box, using: key, authenticating: lengthField),
+              (try? advanceNonceAfterSuccess()) != nil else { return nil }
+        return plaintext
     }
 }
 
@@ -1182,8 +1190,15 @@ final class IntegratedSSHClient: @unchecked Sendable {
             lengthField = IntegratedSSHWire.putUInt32(UInt32(1 + payload.count + pad), into: lengthField)
             let plaintext = Data([UInt8(pad)]) + payload + (try randomBytes(pad))
             guard let sealed = cipher.seal(plaintext: plaintext, lengthField: lengthField) else { throw SSHError.encryptFailed }
-            encrypt = cipher
-            try await writeRaw(lengthField + sealed)
+            // 先写 wire，再提交本地 cipher counter。若写失败，本连接已经不可安全继续；
+            // 绝不能把“未确认写出”的 nonce 状态静默提交后继续发送。
+            do {
+                try await writeRaw(lengthField + sealed)
+                encrypt = cipher
+            } catch {
+                connection.cancel()
+                throw error
+            }
         } else {
             var pad = 8 - ((4 + 1 + payload.count) % 8)
             if pad < 4 { pad += 8 }
