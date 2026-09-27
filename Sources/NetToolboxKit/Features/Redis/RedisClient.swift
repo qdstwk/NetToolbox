@@ -62,10 +62,12 @@ enum RESP {
 }
 
 struct RedisService: Sendable {
-    func run(host: String, port: UInt16, password: String, command: String, tls: Bool) async -> Result<String, EngineError> {
+    func run(host: String, port: UInt16, password: String, command: String, tls: Bool, cancellation: NetworkCancellationHandle) async -> Result<String, EngineError> {
         guard let connection = TCPConnection(host: host, port: port, tls: tls) else {
             return .failure(EngineError(L10nString("banner.error.host")))
         }
+        cancellation.install { connection.cancel() }
+        if cancellation.isCancelled { return .failure(EngineError("Cancelled")) }
         if case .failure(let error) = await connection.open(timeout: 6) {
             connection.cancel()
             return .failure(EngineError(error.localizedDescription))
@@ -77,6 +79,7 @@ struct RedisService: Sendable {
         _ = await connection.send(RESP.encode(command: command))
         let result = await connection.receiveAll(timeout: 3)
         connection.cancel()
+        cancellation.clear()
         switch result {
         case .success(let data): return .success(RESP.format(data))
         case .failure(let error): return .failure(EngineError(error.localizedDescription))
@@ -108,10 +111,12 @@ final class RedisViewModel {
             errorMessage = error.localizedDescription
             return
         }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         isRunning = true
         output = nil
         errorMessage = nil
-        let result = await service.run(host: target, port: port, password: password, command: command, tls: tls)
+        let result = await service.run(host: target, port: port, password: password, command: command, tls: tls, cancellation: cancellation)
         switch result {
         case .success(let text): output = text
         case .failure(let message): errorMessage = message.description
