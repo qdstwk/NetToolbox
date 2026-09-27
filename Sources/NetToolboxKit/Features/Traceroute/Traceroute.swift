@@ -161,28 +161,27 @@ final class TracerouteViewModel {
         tcpSummary = nil
         hops = []
 
-        // Probe every TTL at once instead of walking them one-by-one: a
-        // sequential walk stalls the whole trace on each silent router (up
-        // to `timeout` per hop). Fanning out keeps the total time close to a
-        // single hop's timeout, and results stream in as routers answer.
-        // Each hop is retried up to `retries` times until a router answers.
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "traceroute", target: target)
+        } catch {
+            errorMessage = error.localizedDescription
+            isRunning = false
+            return
+        }
+
+        // Security invariant: exactly one probe is on the wire at a time.
         var collected: [Int: TracerouteHop] = [:]
-        await withTaskGroup(of: TracerouteHop.self) { group in
-            for ttl in 1...maxHops {
-                group.addTask {
-                    var last = TracerouteHop(ttl: ttl, address: nil, rttMs: nil, reached: false)
-                    for _ in 0..<retries {
-                        last = await prober.probe(host: target, ttl: ttl, timeout: timeout)
-                        if last.address != nil { break }
-                    }
-                    return last
-                }
+        for ttl in 1...maxHops {
+            guard isRunning else { break }
+            var hop = TracerouteHop(ttl: ttl, address: nil, rttMs: nil, reached: false)
+            for _ in 0..<retries {
+                hop = await prober.probe(host: target, ttl: ttl, timeout: timeout)
+                if hop.address != nil { break }
             }
-            for await hop in group {
-                collected[hop.ttl] = hop
-                publish(collected, maxHops: maxHops)
-                if !isRunning { group.cancelAll() }
-            }
+            collected[ttl] = hop
+            publish(collected, maxHops: maxHops)
+            if hop.reached { break }
         }
 
         let reached = hops.contains { $0.reached }
@@ -202,6 +201,7 @@ final class TracerouteViewModel {
             }
         }
 
+        await GlobalNetworkOperationGate.shared.release(lease)
         isRunning = false
         history.insert("\(target) — \(hops.count) hops\(reached ? " ✓" : "")", at: 0)
         if history.count > 10 { history.removeLast() }
