@@ -38,13 +38,15 @@ final class NetworkStatusMonitor {
     private(set) var connection: Connection = .unknown
     private(set) var isExpensive = false
 
-    private let monitor = NWPathMonitor()
+    private var monitor: NWPathMonitor?
     private let queue = DispatchQueue(label: "net.status.monitor")
     private var started = false
 
     func start() {
         guard !started else { return }
         started = true
+        let monitor = NWPathMonitor()
+        self.monitor = monitor
         monitor.pathUpdateHandler = { [weak self] path in
             let connection = Self.classify(path)
             let expensive = path.isExpensive
@@ -54,6 +56,16 @@ final class NetworkStatusMonitor {
             }
         }
         monitor.start(queue: queue)
+    }
+
+    func stop() {
+        guard started else { return }
+        started = false
+        monitor?.pathUpdateHandler = nil
+        monitor?.cancel()
+        monitor = nil
+        connection = .unknown
+        isExpensive = false
     }
 
     // `nonisolated` because it only reads the passed-in path — it runs on
