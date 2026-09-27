@@ -65,9 +65,9 @@ final class HTTPTimingViewModel {
         isRunning = true
         errorMessage = nil
         phases = []
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "http-timing", target: url)
+            lease = try await UnifiedNetworkInterface.claim(operation: "http-timing", target: url)
         } catch {
             errorMessage = error.localizedDescription
             isRunning = false
@@ -81,7 +81,7 @@ final class HTTPTimingViewModel {
         } catch {
             errorMessage = error.localizedDescription
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
         isRunning = false
     }
 }
