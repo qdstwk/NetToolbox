@@ -17,6 +17,12 @@ enum UnifiedNetworkInterface {
         let target: String
     }
 
+    /// Synchronous, idempotent teardown hook owned by the active transport.
+    /// It must never start network work; it may only cancel/close.
+    struct Cancellation: @unchecked Sendable {
+        let cancel: @Sendable () -> Void
+    }
+
     enum InterfaceError: LocalizedError, Sendable {
         case busy(operation: String, target: String)
         case foregroundRequired
@@ -33,16 +39,20 @@ enum UnifiedNetworkInterface {
 
     private actor Admission {
         private var active: Lease?
+        private var cancellation: (leaseID: UUID, hook: Cancellation)?
         private var foregroundActive = false
         private var revocationGeneration: UInt64 = 0
 
         func setForegroundActive(_ value: Bool) {
             foregroundActive = value
             if !value {
-                // Revoke admission immediately. Transport teardown is coordinated
-                // by lifecycle owners; clearing here guarantees no new I/O can start.
+                // Revoke admission first, then synchronously tear down the one
+                // permitted active transport. No background grace period.
+                let hook = cancellation?.hook
+                cancellation = nil
                 active = nil
                 revocationGeneration &+= 1
+                hook?.cancel()
             }
         }
 
@@ -56,8 +66,17 @@ enum UnifiedNetworkInterface {
             return lease
         }
 
+        func registerCancellation(_ hook: Cancellation, for lease: Lease) {
+            guard foregroundActive, active?.id == lease.id else {
+                hook.cancel()
+                return
+            }
+            cancellation = (lease.id, hook)
+        }
+
         func release(_ lease: Lease) {
             guard active?.id == lease.id else { return }
+            cancellation = nil
             active = nil
         }
 
@@ -71,6 +90,13 @@ enum UnifiedNetworkInterface {
             operation: operation,
             target: canonicalTarget(target)
         )
+    }
+
+    static func registerCancellation(
+        for lease: Lease,
+        _ cancel: @escaping @Sendable () -> Void
+    ) async {
+        await admission.registerCancellation(Cancellation(cancel: cancel), for: lease)
     }
 
     static func release(_ lease: Lease) async {
