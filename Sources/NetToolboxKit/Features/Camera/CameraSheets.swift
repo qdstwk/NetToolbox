@@ -204,6 +204,7 @@ struct CameraEditorSheet: View {
                 isProbing = false
                 return
             }
+            await UnifiedNetworkInterface.registerCancellation(for: lease) { client.cancelNetwork() }
             do {
                 let result = try await client.discover()
                 discovery = result
