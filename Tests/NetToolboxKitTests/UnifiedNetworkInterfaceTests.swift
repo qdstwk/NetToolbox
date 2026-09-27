@@ -20,9 +20,15 @@ final class UnifiedNetworkInterfaceTests: XCTestCase {
         XCTAssertEqual(activeAfterStaleRelease, "test-b")
 
         let counter = CancellationCounter()
+        let transportCounter = CancellationCounter()
         await UnifiedNetworkInterface.registerCancellation(for: second) { counter.hit() }
+        UnifiedNetworkInterface.registerTransportCancellation { transportCounter.hit() }
+        UnifiedNetworkInterface.setForegroundActiveImmediately(false, generation: 10_001)
+        XCTAssertEqual(counter.value, 1)
+        XCTAssertEqual(transportCounter.value, 1)
         await UnifiedNetworkInterface.setForegroundActive(false, generation: 10_001)
         XCTAssertEqual(counter.value, 1)
+        XCTAssertEqual(transportCounter.value, 1)
         let activeAfterRevocation = await UnifiedNetworkInterface.activeOperation()
         XCTAssertNil(activeAfterRevocation)
 
