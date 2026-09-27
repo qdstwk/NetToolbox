@@ -3,19 +3,11 @@ import Foundation
 /// Default `HTTPDataClient` backed by `URLSession` with an ephemeral,
 /// short-timeout configuration suited to quick diagnostic calls.
 struct URLSessionDataClient: HTTPDataClient {
-    private let session: URLSession
-
-    init() {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 15
-        configuration.timeoutIntervalForResource = 30
-        configuration.waitsForConnectivity = false
-        session = URLSession(configuration: configuration)
-    }
-
     func data(from url: URL) async throws -> Data {
         do {
-            let (data, response) = try await session.data(from: url)
+            let (data, response) = try await UnifiedNetworkInterface.httpData(
+                from: url, operation: "http-data", target: url.host ?? url.absoluteString
+            )
             if let http = response as? HTTPURLResponse,
                !(200..<300).contains(http.statusCode) {
                 throw NetworkServiceError.badStatus(http.statusCode)
