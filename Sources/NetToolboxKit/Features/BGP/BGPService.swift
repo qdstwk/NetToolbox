@@ -40,7 +40,9 @@ enum BGPError: LocalizedError {
 /// Global routing (BGP) lookups via the public **RIPEstat** data API — no
 /// key, no external libraries, just HTTPS + JSON. Covers ASN overview /
 /// announced prefixes / neighbours and IP→origin-AS resolution.
-struct BGPService: Sendable {
+final class BGPService: @unchecked Sendable {
+    private let session = URLSession(configuration: .ephemeral)
+    func cancel() { session.invalidateAndCancel() }
     private struct Envelope<T: Decodable>: Decodable { let data: T }
 
     private func get<T: Decodable>(_ call: String, resource: String) async throws -> T {
@@ -52,7 +54,7 @@ struct BGPService: Sendable {
             URLQueryItem(name: "sourceapp", value: "nettoolbox"),
         ]
         guard let url = components.url else { throw BGPError.badInput }
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await session.data(from: url)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw BGPError.network }
         do {
             return try JSONDecoder().decode(Envelope<T>.self, from: data).data
