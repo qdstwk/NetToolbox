@@ -53,15 +53,26 @@ final class RBLCheckViewModel {
             errorMessage = String(localized: "error.probe.invalidHost", bundle: .module)
             return
         }
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "rbl-check", target: target) }
+        catch { errorMessage = error.localizedDescription; return }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         errorMessage = nil
         isChecking = true
         results = []
 
         for zone in RBL.zones {
             guard isChecking, let query = RBL.query(ip: target, zone: zone) else { continue }
-            let records = (try? await resolver.resolve(name: query, type: .a, server: "1.1.1.1")) ?? []
+            let records: [DNSRecord]
+            if let udp = resolver as? UDPDNSResolver {
+                records = (try? await udp.resolve(name: query, type: .a, server: "1.1.1.1", cancellation: cancellation)) ?? []
+            } else {
+                records = (try? await resolver.resolve(name: query, type: .a, server: "1.1.1.1")) ?? []
+            }
             results.append(RBLResult(zone: zone, listed: !records.isEmpty))
         }
+        await UnifiedNetworkInterface.release(lease)
         isChecking = false
     }
 }
