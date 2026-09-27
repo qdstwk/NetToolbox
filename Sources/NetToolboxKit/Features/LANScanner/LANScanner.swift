@@ -95,54 +95,6 @@ enum LANMerge {
     static func ipValue(_ ip: String) -> UInt32 { (try? SubnetEngine.parseIPv4(ip)) ?? 0 }
 }
 
-/// Blocking DNS helpers (reverse PTR and forward A) used off the main actor.
-enum LANDNS {
-    #if canImport(Darwin)
-    static func isIPv4(_ text: String) -> Bool {
-        var addr = in_addr()
-        return text.withCString { inet_pton(AF_INET, $0, &addr) } == 1
-    }
-
-    /// Reverse-DNS a dotted-quad to a hostname (nil when there's no PTR record).
-    static func reverseName(ip: String) -> String? {
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        guard ip.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 else { return nil }
-        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        let status = withUnsafePointer(to: &addr) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                getnameinfo(sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size),
-                            &host, socklen_t(host.count), nil, 0, NI_NAMEREQD)
-            }
-        }
-        guard status == 0 else { return nil }
-        let name = String(cString: host)
-        return (name.isEmpty || name == ip) ? nil : name
-    }
-
-    /// Resolve a hostname (e.g. a Bonjour `.local` name) to its first IPv4.
-    static func resolveIPv4(host: String) -> String? {
-        var hints = addrinfo(
-            ai_flags: 0, ai_family: AF_INET, ai_socktype: SOCK_STREAM,
-            ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil
-        )
-        var info: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, nil, &hints, &info) == 0, let first = info else { return nil }
-        defer { freeaddrinfo(info) }
-        guard let addr = first.pointee.ai_addr else { return nil }
-        var sin = sockaddr_in()
-        memcpy(&sin, addr, Int(MemoryLayout<sockaddr_in>.size))
-        var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-        inet_ntop(AF_INET, &sin.sin_addr, &buffer, socklen_t(INET_ADDRSTRLEN))
-        return String(cString: buffer)
-    }
-    #else
-    static func isIPv4(_ text: String) -> Bool { false }
-    static func reverseName(ip: String) -> String? { nil }
-    static func resolveIPv4(host: String) -> String? { nil }
-    #endif
-}
-
 /// Discovers everything reachable on the local network: it runs an ICMP+TCP
 /// sweep of the device's subnet, browses Bonjour/mDNS, and reverse-DNS-names
 /// the results, then merges them into one device list. Requires the host app's
@@ -164,6 +116,7 @@ final class LANScannerViewModel {
     var toolID = ""
 
     private var scanTask: Task<Void, Never>?
+    private var currentCancellation: NetworkCancellationHandle?
 
     func start() {
         stop()
@@ -175,6 +128,8 @@ final class LANScannerViewModel {
 
     func stop() {
         scanTask?.cancel()
+        currentCancellation?.cancel()
+        currentCancellation = nil
         scanTask = nil
         if isScanning {
             history.insert("\(devices.count) devices", at: 0)
@@ -189,8 +144,11 @@ final class LANScannerViewModel {
         let lease: UnifiedNetworkInterface.Lease
         do { lease = try await UnifiedNetworkInterface.claim(operation: "lan-scan", target: cidr) }
         catch { isScanning = false; return }
+        let cancellation = NetworkCancellationHandle()
+        currentCancellation = cancellation
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         let hosts = (try? IPRangeScanner.hosts(cidr: cidr)) ?? []
-        let swept = await Self.sweep(hosts)
+        let swept = await Self.sweep(hosts, cancellation: cancellation)
         if Task.isCancelled {
             await UnifiedNetworkInterface.release(lease)
             return
@@ -199,7 +157,7 @@ final class LANScannerViewModel {
         // 2. Strict single-line mode: no parallel Bonjour browsers.
         // Reverse DNS is also performed one address at a time.
         let addresses = swept.map(\.ip)
-        let reverse = await Self.reverseDNS(addresses)
+        let reverse = await Self.reverseDNS(addresses, cancellation: cancellation)
         if Task.isCancelled {
             await UnifiedNetworkInterface.release(lease)
             return
@@ -208,6 +166,7 @@ final class LANScannerViewModel {
         // 4. Merge and publish.
         devices = LANMerge.devices(swept: swept, bonjour: [], reverseDNS: reverse)
         showPermissionHint = devices.isEmpty
+        currentCancellation = nil
         await UnifiedNetworkInterface.release(lease)
         history.insert("\(devices.count) devices", at: 0)
         if history.count > 10 { history.removeLast() }
@@ -217,25 +176,30 @@ final class LANScannerViewModel {
     // MARK: - Off-actor discovery
 
     /// ICMP + TCP-connect sweep of the given hosts, concurrency-limited.
-    private nonisolated static func sweep(_ hosts: [String]) async -> [HostResult] {
+    private nonisolated static func sweep(_ hosts: [String], cancellation: NetworkCancellationHandle) async -> [HostResult] {
         var results: [HostResult] = []
         for ip in hosts {
             if Task.isCancelled { break }
-            var rtt = await ICMPHostPinger.probe(ip: ip, timeout: 0.9)
+            var rtt = await ICMPHostPinger.probe(ip: ip, timeout: 0.9, cancellation: cancellation)
             if rtt == nil {
-                rtt = await TCPHostProbe.probe(ip: ip, timeout: 0.9)
+                rtt = await TCPHostProbe.probe(ip: ip, timeout: 0.9, cancellation: cancellation)
             }
             if let rtt { results.append(HostResult(ip: ip, rttMs: rtt)) }
         }
         return results
     }
 
-    private nonisolated static func reverseDNS(_ ips: [String]) async -> [String: String] {
+    private nonisolated static func reverseDNS(_ ips: [String], cancellation: NetworkCancellationHandle) async -> [String: String] {
         let unique = Array(Set(ips)).sorted()
         var map: [String: String] = [:]
+        let dns = UDPDNSResolver()
         for ip in unique {
-            if Task.isCancelled { break }
-            if let name = LANDNS.reverseName(ip: ip) { map[ip] = name }
+            if Task.isCancelled || cancellation.isCancelled { break }
+            let reversed = ip.split(separator: ".").reversed().joined(separator: ".") + ".in-addr.arpa"
+            if let records = try? await dns.resolve(name: reversed, type: .ptr, server: "1.1.1.1", cancellation: cancellation),
+               let name = records.first?.value, !name.isEmpty {
+                map[ip] = name
+            }
         }
         return map
     }
