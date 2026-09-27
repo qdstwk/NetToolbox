@@ -59,9 +59,9 @@ final class WebSocketViewModel {
         message = ""
     }
 
-    func disconnect() {
+    func disconnect() async {
         client.disconnect()
-        releaseNetworkLease()
+        await releaseNetworkLease()
         if isConnected {
             isConnected = false
             append(.system, L10nString("websocket.status.closed"))
@@ -72,10 +72,10 @@ final class WebSocketViewModel {
         transcript = []
     }
 
-    private func releaseNetworkLease() {
+    private func releaseNetworkLease() async {
         guard let lease = networkLease else { return }
         networkLease = nil
-        Task { await UnifiedNetworkInterface.release(lease) }
+        await UnifiedNetworkInterface.release(lease)
     }
 
     private func handle(_ event: WebSocketClient.Event) {
@@ -88,11 +88,11 @@ final class WebSocketViewModel {
         case .binary(let count):
             append(.received, "‹\(count) bytes›")
         case .closed(let reason):
-            releaseNetworkLease()
+            Task { await releaseNetworkLease() }
             isConnected = false
             append(.system, reason.map { "\(L10nString("websocket.status.closed")): \($0)" } ?? L10nString("websocket.status.closed"))
         case .error(let message):
-            releaseNetworkLease()
+            Task { await releaseNetworkLease() }
             isConnected = false
             append(.error, message)
         }
@@ -169,7 +169,7 @@ struct WebSocketView: View {
 
             if viewModel.isConnected {
                 Button(role: .destructive) {
-                    viewModel.disconnect()
+                    Task { await viewModel.disconnect() }
                 } label: {
                     Label(L10nString("websocket.action.disconnect"), systemImage: "xmark.circle")
                         .font(AppTypography.headline)
