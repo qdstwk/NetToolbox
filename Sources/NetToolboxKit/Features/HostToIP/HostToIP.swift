@@ -73,7 +73,11 @@ final class HostToIPViewModel {
         let trimmed = host.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { output = .idle; return }
         output = .loading
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "host-resolve", target: trimmed) }
+        catch { output = .failure; return }
         let addresses = await resolver.resolve(trimmed)
+        await UnifiedNetworkInterface.release(lease)
         output = addresses.isEmpty ? .failure : .success(addresses)
     }
 }
