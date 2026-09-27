@@ -82,9 +82,9 @@ final class HTTPRequestViewModel {
     func send() async {
         guard !url.trimmingCharacters(in: .whitespaces).isEmpty else { output = .idle; return }
         output = .loading
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "http-request", target: url)
+            lease = try await UnifiedNetworkInterface.claim(operation: "http-request", target: url)
         } catch {
             output = .failure(error.localizedDescription)
             return
@@ -94,7 +94,7 @@ final class HTTPRequestViewModel {
         } catch {
             output = .failure(error.localizedDescription)
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
