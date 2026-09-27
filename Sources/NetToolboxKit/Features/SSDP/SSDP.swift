@@ -41,20 +41,23 @@ enum SSDPEngine {
     /// Blocking multicast discovery. Runs off the main actor. On iOS this
     /// requires the multicast networking entitlement; without it the send
     /// fails and no devices are returned.
-    static func discover(searchTarget: String, timeout: Double) async -> [SSDPDevice] {
+    static func discover(searchTarget: String, timeout: Double, cancellation: NetworkCancellationHandle) async -> [SSDPDevice] {
         await withCheckedContinuation { (continuation: CheckedContinuation<[SSDPDevice], Never>) in
             let shot = OneShot(continuation)
             DispatchQueue.global(qos: .userInitiated).async {
-                shot.resume(blockingDiscover(searchTarget: searchTarget, timeout: timeout))
+                shot.resume(blockingDiscover(searchTarget: searchTarget, timeout: timeout, cancellation: cancellation))
             }
         }
     }
 
     #if canImport(Darwin)
-    private static func blockingDiscover(searchTarget: String, timeout: Double) -> [SSDPDevice] {
+    private static func blockingDiscover(searchTarget: String, timeout: Double, cancellation: NetworkCancellationHandle) -> [SSDPDevice] {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { return [] }
-        defer { close(fd) }
+        let owner = SSDPSocketOwner(fd)
+        defer { owner.cancel(); cancellation.clear() }
+        cancellation.install { owner.cancel() }
+        if cancellation.isCancelled { return [] }
 
         var reuse: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
@@ -117,8 +120,13 @@ enum SSDPEngine {
         }
         return Array(devices.values).sorted { $0.address < $1.address }
     }
+    private final class SSDPSocketOwner: @unchecked Sendable {
+        private let lock = NSLock(); private var fd: Int32?
+        init(_ fd: Int32) { self.fd = fd }
+        func cancel() { lock.lock(); let v = fd; fd = nil; lock.unlock(); if let v { close(v) } }
+    }
     #else
-    private static func blockingDiscover(searchTarget: String, timeout: Double) -> [SSDPDevice] { [] }
+    private static func blockingDiscover(searchTarget: String, timeout: Double, cancellation: NetworkCancellationHandle) -> [SSDPDevice] { [] }
     #endif
 }
 
@@ -139,7 +147,9 @@ final class SSDPViewModel {
         let lease: UnifiedNetworkInterface.Lease
         do { lease = try await UnifiedNetworkInterface.claim(operation: "ssdp", target: "239.255.255.250:1900") }
         catch { isScanning = false; didScan = true; return }
-        devices = await SSDPEngine.discover(searchTarget: searchTarget, timeout: 4)
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
+        devices = await SSDPEngine.discover(searchTarget: searchTarget, timeout: 4, cancellation: cancellation)
         await UnifiedNetworkInterface.release(lease)
         didScan = true
         isScanning = false
