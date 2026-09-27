@@ -33,10 +33,8 @@ struct HTTPInspectorService: HTTPInspecting {
         request.timeoutInterval = 15
         request.setValue("NetToolbox/1.0", forHTTPHeaderField: "User-Agent")
 
-        let configuration = URLSessionConfiguration.ephemeral
-        let session = URLSession(configuration: configuration)
         do {
-            let (_, response) = try await session.data(for: request)
+            let (_, response) = try await UnifiedNetworkInterface.httpData(for: request, operation: "http-headers", target: normalized)
             guard let http = response as? HTTPURLResponse else {
                 throw NetworkServiceError.decoding
             }
@@ -79,19 +77,11 @@ final class HTTPHeadersViewModel {
         let trimmed = urlString.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { output = .idle; return }
         output = .loading
-        let lease: UnifiedNetworkInterface.Lease
-        do {
-            lease = try await UnifiedNetworkInterface.claim(operation: "http-headers", target: trimmed)
-        } catch {
-            output = .failure(error.localizedDescription)
-            return
-        }
         do {
             output = .success(try await service.inspect(trimmed))
         } catch {
             output = .failure(error.localizedDescription)
         }
-        await UnifiedNetworkInterface.release(lease)
     }
 }
 
