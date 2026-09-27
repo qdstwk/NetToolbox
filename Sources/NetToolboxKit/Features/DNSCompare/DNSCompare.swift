@@ -57,7 +57,7 @@ final class DNSCompareViewModel {
         var collected: [DNSCompareRow] = []
         for endpoint in Self.resolvers {
             do {
-                let records = try await resolver.resolve(name: target, type: recordType, server: endpoint.host)
+                let records = try await resolver.resolve(name: target, type: recordType, server: endpoint.host, lease: lease)
                 let values = records.filter { $0.type == recordType }.map { $0.value }.sorted()
                 collected.append(DNSCompareRow(id: endpoint.id, resolver: endpoint.name, values: values, error: nil))
             } catch {
