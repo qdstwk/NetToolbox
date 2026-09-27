@@ -68,7 +68,13 @@ final class RPKIViewModel {
         }
         output = .loading
         do {
-            let (data, _) = try await URLSession(configuration: .ephemeral).data(from: url)
+            let lease = try await UnifiedNetworkInterface.claim(operation: "rpki", target: cleanPrefix)
+            let session = URLSession(configuration: .ephemeral)
+            await UnifiedNetworkInterface.registerCancellation(for: lease) { session.invalidateAndCancel() }
+            let data: Data
+            do { (data, _) = try await session.data(from: url) }
+            catch { await UnifiedNetworkInterface.release(lease); throw error }
+            await UnifiedNetworkInterface.release(lease)
             let decoded = try JSONDecoder().decode(RIPEStatRPKI.self, from: data)
             let roas = (decoded.data.validating_roas ?? []).map {
                 RPKIRoa(origin: $0.origin ?? "?", prefix: $0.prefix ?? "?",
