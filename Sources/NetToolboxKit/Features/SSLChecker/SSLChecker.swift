@@ -207,14 +207,14 @@ final class SSLInspector: SSLInspecting, @unchecked Sendable {
         ]
         var supported: [(Int, String)] = []
         for (index, entry) in versions.enumerated() {
-            if await Self.supports(host: cleanHost, port: port, version: entry.1) {
+            if await supports(host: cleanHost, port: port, version: entry.1) {
                 supported.append((index, entry.0))
             }
         }
         return supported.sorted { $0.0 < $1.0 }.map(\.1)
     }
 
-    private static func supports(host: String, port: UInt16, version: tls_protocol_version_t) async -> Bool {
+    private func supports(host: String, port: UInt16, version: tls_protocol_version_t) async -> Bool {
         await withCheckedContinuation { continuation in
             let shot = OneShot(continuation)
             guard let nwPort = NWEndpoint.Port(rawValue: port) else { shot.resume(false); return }
