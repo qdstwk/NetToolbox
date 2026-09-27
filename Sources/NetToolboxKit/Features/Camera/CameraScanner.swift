@@ -20,9 +20,9 @@ struct CameraScanner: Sendable {
 
     /// Probes `base`1…254 on `port`, returning the reachable hosts.
     func scan(base: String, port: UInt16 = 554, timeout: Double = 1.0, concurrency: Int = 24) async -> [String] {
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "camera-scan", target: base)
+            lease = try await UnifiedNetworkInterface.claim(operation: "camera-scan", target: base)
         } catch {
             return []
         }
@@ -32,7 +32,7 @@ struct CameraScanner: Sendable {
                 found.append(ip)
             }
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
         return found.sorted { lastOctet($0) < lastOctet($1) }
     }
 
