@@ -103,7 +103,6 @@ final class SSHViewModel {
             return
         }
         await UnifiedNetworkInterface.registerCancellation(for: lease) { client.close() }
-        defer { Task { await UnifiedNetworkInterface.release(lease) } }
         isRunning = true
         let user = username.trimmingCharacters(in: .whitespaces)
         let command = self.command
@@ -114,6 +113,7 @@ final class SSHViewModel {
         } catch {
             errorMessage = error.localizedDescription + "\n\(client.diagnostics) · stage=\(client.stage)"
         }
+        await UnifiedNetworkInterface.release(lease)
         isRunning = false
     }
 
@@ -134,13 +134,13 @@ final class SSHViewModel {
             return
         }
         isRunning = true
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { client.close() }
         let user = username.trimmingCharacters(in: .whitespaces)
         do {
             try await client.openShell(username: user, auth: auth, timeout: 12)
             evaluateTrust(fingerprint: client.fingerprint)
             shellClient = client
             shellNetworkLease = lease
-            await UnifiedNetworkInterface.registerCancellation(for: lease) { client.close() }
             shellConnected = true
             startReading(client)
         } catch {
