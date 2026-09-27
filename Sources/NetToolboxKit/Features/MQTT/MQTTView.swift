@@ -77,11 +77,11 @@ final class MQTTViewModel {
         publishText = ""
     }
 
-    func disconnect() {
+    func disconnect() async {
         client?.disconnect()
         if let lease = networkLease {
             networkLease = nil
-            Task { await UnifiedNetworkInterface.release(lease) }
+            await UnifiedNetworkInterface.release(lease)
         }
     }
 
@@ -100,19 +100,19 @@ final class MQTTViewModel {
             append(.message, "\(topic) ▸ \(payload)")
         case .disconnected:
             isConnected = false
-            releaseLease()
+            Task { await releaseLease() }
             append(.system, L10nString("mqtt.status.disconnected"))
         case .error(let message):
             isConnected = false
-            releaseLease()
+            Task { await releaseLease() }
             append(.error, message)
         }
     }
 
-    private func releaseLease() {
+    private func releaseLease() async {
         guard let lease = networkLease else { return }
         networkLease = nil
-        Task { await UnifiedNetworkInterface.release(lease) }
+        await UnifiedNetworkInterface.release(lease)
     }
 
     private func append(_ kind: Entry.Kind, _ text: String) {
@@ -222,7 +222,7 @@ struct MQTTView: View {
 
             if viewModel.isConnected {
                 Button(role: .destructive) {
-                    viewModel.disconnect()
+                    Task { await viewModel.disconnect() }
                 } label: {
                     Label(L10nString("mqtt.action.disconnect"), systemImage: "xmark.circle")
                         .font(AppTypography.headline)
