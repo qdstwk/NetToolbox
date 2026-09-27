@@ -86,10 +86,21 @@ public struct NetToolboxRootView: View {
                 }
             }
             .animation(.easeInOut, value: appLock.isLocked)
+            .task {
+                // Network is fail-closed until the scene is explicitly active.
+                await UnifiedNetworkInterface.setForegroundActive(scenePhase == .active)
+            }
             .onChange(of: scenePhase) { _, phase in
+                Task {
+                    // Security rule: the instant the app is no longer ACTIVE
+                    // (Control Center, app switcher, another app, lock screen,
+                    // background, etc.), revoke all network admission.
+                    await UnifiedNetworkInterface.setForegroundActive(phase == .active)
+                }
                 if phase != .active {
                     appLock.lockIfEnabled()
-                    cloudSync.pushAll()
+                    // Deliberately do NOT start cloud/network work here.
+                    // Background transition must only tear down/revoke.
                 }
             }
     }
