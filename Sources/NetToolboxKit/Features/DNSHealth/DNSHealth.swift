@@ -69,9 +69,9 @@ final class DNSHealthViewModel {
         dnssec = .unknown
         results = DNSHealthEngine.resolvers.map { DNSResolverResult(name: $0.name, server: $0.ip) }
 
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "dns-health", target: host)
+            lease = try await UnifiedNetworkInterface.claim(operation: "dns-health", target: host)
         } catch {
             errorMessage = error.localizedDescription
             isRunning = false
@@ -93,7 +93,7 @@ final class DNSHealthViewModel {
 
         consistent = DNSHealthEngine.consistent(results)
         dnssec = await checkDNSSEC(host: host, type: type)
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
         hasRun = true
         isRunning = false
     }
