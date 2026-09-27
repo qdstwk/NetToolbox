@@ -26,7 +26,7 @@ protocol TracerouteProbing: Sendable {
 /// Intermediate routers answer with ICMP Time Exceeded; the destination
 /// answers with an Echo Reply.
 struct ICMPTraceroute: TracerouteProbing {
-    func probe(host: String, ttl: Int, timeout: Double) async -> TracerouteHop {
+    func probe(host: String, ttl: Int, timeout: Double, cancellation: NetworkCancellationHandle) async -> TracerouteHop {
         await withCheckedContinuation { continuation in
             let shot = OneShot(continuation)
             DispatchQueue.global(qos: .userInitiated).async {
