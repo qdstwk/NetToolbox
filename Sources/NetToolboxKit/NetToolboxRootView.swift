@@ -37,6 +37,7 @@ public struct NetToolboxRootView: View {
     @State private var knownHosts = KnownHostsStore()
     @State private var sshConnect = SSHConnectRequest()
     @Environment(\.scenePhase) private var scenePhase
+    @State private var lifecycleGeneration: UInt64 = 0
     private let toolSessions = ToolSessions()
 
     /// - Parameter theme: pass a custom `Theme` to force one look and hide
@@ -88,14 +89,16 @@ public struct NetToolboxRootView: View {
             .animation(.easeInOut, value: appLock.isLocked)
             .task {
                 // Network is fail-closed until the scene is explicitly active.
-                await UnifiedNetworkInterface.setForegroundActive(scenePhase == .active)
+                await UnifiedNetworkInterface.setForegroundActive(scenePhase == .active, generation: lifecycleGeneration)
             }
             .onChange(of: scenePhase) { _, phase in
+                lifecycleGeneration &+= 1
+                let generation = lifecycleGeneration
                 Task {
                     // Security rule: the instant the app is no longer ACTIVE
                     // (Control Center, app switcher, another app, lock screen,
                     // background, etc.), revoke all network admission.
-                    await UnifiedNetworkInterface.setForegroundActive(phase == .active)
+                    await UnifiedNetworkInterface.setForegroundActive(phase == .active, generation: generation)
                 }
                 if phase == .active {
                     status.start()
