@@ -25,8 +25,19 @@ struct CertTransparencyService: Sendable {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
 
-        let (data, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+        let lease = try await UnifiedNetworkInterface.claim(operation: "cert-transparency", target: domain)
+        let session = URLSession(configuration: .ephemeral)
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { session.invalidateAndCancel() }
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            await UnifiedNetworkInterface.release(lease)
+            throw error
+        }
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            await UnifiedNetworkInterface.release(lease)
             throw NetworkServiceError.badStatus(http.statusCode)
         }
 
@@ -39,8 +50,10 @@ struct CertTransparencyService: Sendable {
             let not_after: String?
         }
         guard let rows = try? JSONDecoder().decode([Row].self, from: data) else {
+            await UnifiedNetworkInterface.release(lease)
             throw NetworkServiceError.decoding
         }
+        await UnifiedNetworkInterface.release(lease)
 
         var seen = Set<String>()
         var entries: [CTEntry] = []
