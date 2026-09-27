@@ -32,32 +32,6 @@ struct TCPPortScanner: PortScanning {
     }
 }
 
-/// A simple async concurrency gate.
-actor ConcurrencyLimiter {
-    private let limit: Int
-    private var active = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(limit: Int) { self.limit = limit }
-
-    func acquire() async {
-        if active < limit {
-            active += 1
-            return
-        }
-        await withCheckedContinuation { waiters.append($0) }
-        active += 1
-    }
-
-    func release() {
-        active -= 1
-        if !waiters.isEmpty {
-            let next = waiters.removeFirst()
-            next.resume()
-        }
-    }
-}
-
 /// Parses a port specification like "22, 80, 443, 8000-8100" into a sorted
 /// list of ports. Pure and unit-tested.
 enum PortList {
@@ -148,8 +122,11 @@ final class PortScannerViewModel {
         let cancellation = NetworkCancellationHandle()
         currentCancellation = cancellation
         await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
+        let scanClock = ContinuousClock()
+        let scanStart = scanClock.now
         for port in targetPorts {
-            guard isScanning, !cancellation.isCancelled else { break }
+            guard isScanning, !cancellation.isCancelled,
+                  scanStart.duration(to: scanClock.now) < UnifiedNetworkInterface.Deadline.scan else { break }
             let probe = await TCPProbe.connectLatency(host: target, port: port, timeout: 1.5, cancellation: cancellation)
             scannedCount += 1
             if (try? probe.get()) != nil {
