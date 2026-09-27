@@ -73,7 +73,7 @@ public struct NetToolboxRootView: View {
             // Follow the system appearance by default, or force light/dark.
             .preferredColorScheme((AppearanceOption(rawValue: appearanceSelection) ?? .system).colorScheme)
             .modelContainer(for: [HistoryEntry.self, SavedHost.self, Favorite.self])
-            .task { status.start() }
+            .task { if scenePhase == .active { status.start() } }
             .task { cloudSync.start() }
             .task { favorites.seedStarterFavoritesIfNeeded() }
             // Biometric app lock: cover the UI while locked and re-lock when
@@ -97,7 +97,10 @@ public struct NetToolboxRootView: View {
                     // background, etc.), revoke all network admission.
                     await UnifiedNetworkInterface.setForegroundActive(phase == .active)
                 }
-                if phase != .active {
+                if phase == .active {
+                    status.start()
+                } else {
+                    status.stop()
                     appLock.lockIfEnabled()
                     // Deliberately do NOT start cloud/network work here.
                     // Background transition must only tear down/revoke.
