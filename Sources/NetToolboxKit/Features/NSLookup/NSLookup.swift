@@ -65,16 +65,24 @@ final class NSLookupViewModel {
         guard !target.isEmpty else { output = .idle; return }
         output = .loading
 
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "nslookup", target: target) }
+        catch { output = .notFound; return }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
+        let dns = UDPDNSResolver()
+
         if isReverse {
-            if let host = await ReverseDNS.hostname(for: target) {
-                output = .reverse(host)
-            } else {
-                output = .notFound
-            }
+            let reversed = target.split(separator: ".").reversed().joined(separator: ".") + ".in-addr.arpa"
+            let records = (try? await dns.resolve(name: reversed, type: .ptr, server: "1.1.1.1", cancellation: cancellation)) ?? []
+            output = records.first.map { .reverse($0.value) } ?? .notFound
         } else {
-            let addresses = await resolver.resolve(target)
+            let a = (try? await dns.resolve(name: target, type: .a, server: "1.1.1.1", cancellation: cancellation)) ?? []
+            let aaaa = cancellation.isCancelled ? [] : ((try? await dns.resolve(name: target, type: .aaaa, server: "1.1.1.1", cancellation: cancellation)) ?? [])
+            let addresses = (a + aaaa).map(\.value)
             output = addresses.isEmpty ? .notFound : .forward(addresses)
         }
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
