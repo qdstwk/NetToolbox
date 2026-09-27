@@ -118,9 +118,9 @@ final class WorldPingViewModel {
         isRunning = true
         errorMessage = nil
         probes = []
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "world-ping", target: target)
+            lease = try await UnifiedNetworkInterface.claim(operation: "world-ping", target: target)
         } catch {
             errorMessage = error.localizedDescription
             isRunning = false
@@ -138,7 +138,7 @@ final class WorldPingViewModel {
         } catch {
             errorMessage = error.localizedDescription
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
         isRunning = false
     }
 
