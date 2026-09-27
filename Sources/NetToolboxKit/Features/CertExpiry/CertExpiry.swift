@@ -50,7 +50,6 @@ final class CertExpiryViewModel {
         hosts.append(host)
         results.append(CertExpiryResult(host: host))
         newHost = ""
-        Task { await refresh() }
     }
 
     func remove(_ host: String) {
@@ -69,6 +68,7 @@ final class CertExpiryViewModel {
             let lease: UnifiedNetworkInterface.Lease
             do { lease = try await UnifiedNetworkInterface.claim(operation: "cert-expiry", target: host) }
             catch { result.error = error.localizedDescription; checked.append(result); continue }
+            await UnifiedNetworkInterface.registerCancellation(for: lease) { [inspector] in inspector.cancel() }
             switch await inspector.inspect(host: host, port: 443) {
             case .success(let info):
                 result.daysRemaining = info.daysRemaining
