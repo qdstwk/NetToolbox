@@ -106,6 +106,7 @@ final class PortScannerViewModel {
     private(set) var history: [String] = []
     var activity: ActivityCenter?
     var toolID = ""
+    private var currentCancellation: NetworkCancellationHandle?
 
     var openPorts: [PortScanResult] { results }
 
@@ -145,6 +146,7 @@ final class PortScannerViewModel {
         }
 
         let cancellation = NetworkCancellationHandle()
+        currentCancellation = cancellation
         await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         for port in targetPorts {
             guard isScanning, !cancellation.isCancelled else { break }
@@ -157,13 +159,17 @@ final class PortScannerViewModel {
                 ))
             }
         }
+        currentCancellation = nil
         await UnifiedNetworkInterface.release(lease)
         isScanning = false
         history.insert("\(target) — \(results.count) open / \(totalCount)", at: 0)
         if history.count > 10 { history.removeLast() }
     }
 
-    func stop() { isScanning = false }
+    func stop() {
+        currentCancellation?.cancel()
+        isScanning = false
+    }
 }
 
 struct PortScannerTool: NetworkTool {
