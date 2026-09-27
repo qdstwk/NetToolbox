@@ -76,11 +76,15 @@ final class NTPViewModel {
         let target = server.trimmingCharacters(in: .whitespaces)
         guard !target.isEmpty else { output = .idle; return }
         output = .loading
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "ntp", target: target) }
+        catch { output = .failure(error.localizedDescription); return }
         do {
             output = .success(try await service.query(server: target))
         } catch {
             output = .failure(error.localizedDescription)
         }
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
