@@ -17,15 +17,23 @@ struct DoHResolver {
         request.setValue("application/dns-message", forHTTPHeaderField: "accept")
         request.httpBody = query
 
+        let lease = try await UnifiedNetworkInterface.claim(operation: "doh", target: host)
         let session = URLSession(configuration: .ephemeral)
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { session.invalidateAndCancel() }
         do {
             let (data, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                 throw NetworkServiceError.badStatus(http.statusCode)
             }
-            return try DNSMessage.decodeAnswers(data)
+            let records = try DNSMessage.decodeAnswers(data)
+            await UnifiedNetworkInterface.release(lease)
+            return records
         } catch let error as URLError where error.code == .notConnectedToInternet {
+            await UnifiedNetworkInterface.release(lease)
             throw NetworkServiceError.offline
+        } catch {
+            await UnifiedNetworkInterface.release(lease)
+            throw error
         }
     }
 }
