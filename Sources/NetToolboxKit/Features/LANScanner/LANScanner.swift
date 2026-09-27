@@ -1,6 +1,5 @@
 import SwiftUI
 import Observation
-import Network
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -164,22 +163,11 @@ final class LANScannerViewModel {
     var activity: ActivityCenter?
     var toolID = ""
 
-    private var browsers: [NWBrowser] = []
-    private let queue = DispatchQueue(label: "net.lan.browse")
-    private var bonjourRaw: [DiscoveredService] = []
     private var scanTask: Task<Void, Never>?
-
-    private let serviceTypes = [
-        "_http._tcp", "_https._tcp", "_ssh._tcp", "_smb._tcp", "_afpovertcp._tcp",
-        "_airplay._tcp", "_raop._tcp", "_ipp._tcp", "_printer._tcp", "_pdl-datastream._tcp",
-        "_googlecast._tcp", "_rfb._tcp", "_device-info._tcp", "_homekit._tcp", "_hap._tcp",
-        "_workstation._tcp", "_companion-link._tcp", "_spotify-connect._tcp", "_scanner._tcp",
-    ]
 
     func start() {
         stop()
         devices = []
-        bonjourRaw = []
         showPermissionHint = false
         isScanning = true
         scanTask = Task { await runScan() }
@@ -188,17 +176,11 @@ final class LANScannerViewModel {
     func stop() {
         scanTask?.cancel()
         scanTask = nil
-        stopBrowsers()
         if isScanning {
             history.insert("\(devices.count) devices", at: 0)
             if history.count > 10 { history.removeLast() }
         }
         isScanning = false
-    }
-
-    private func stopBrowsers() {
-        browsers.forEach { $0.cancel() }
-        browsers = []
     }
 
     private func runScan() async {
@@ -226,46 +208,10 @@ final class LANScannerViewModel {
         // 4. Merge and publish.
         devices = LANMerge.devices(swept: swept, bonjour: [], reverseDNS: reverse)
         showPermissionHint = devices.isEmpty
-        stopBrowsers()
         await UnifiedNetworkInterface.release(lease)
         history.insert("\(devices.count) devices", at: 0)
         if history.count > 10 { history.removeLast() }
         isScanning = false
-    }
-
-    // MARK: - Bonjour collection
-
-    private func startBonjour() {
-        let parameters = NWParameters()
-        parameters.includePeerToPeer = true
-        for type in serviceTypes {
-            let browser = NWBrowser(for: .bonjour(type: type, domain: nil), using: parameters)
-            browser.browseResultsChangedHandler = { [weak self] results, _ in
-                let found = results.compactMap { Self.service(from: $0) }
-                Task { @MainActor [weak self] in self?.mergeBonjour(found) }
-            }
-            browser.start(queue: queue)
-            browsers.append(browser)
-        }
-    }
-
-    private func mergeBonjour(_ found: [DiscoveredService]) {
-        for service in found where !bonjourRaw.contains(where: { $0.id == service.id }) {
-            bonjourRaw.append(service)
-            resolveBonjourHost(service)
-        }
-    }
-
-    private func resolveBonjourHost(_ service: DiscoveredService) {
-        let name = service.name, type = service.type, domain = service.domain
-        Task { [weak self] in
-            guard let resolved = await Self.resolveEndpoint(name: name, type: type, domain: domain) else { return }
-            await MainActor.run {
-                guard let self, let index = self.bonjourRaw.firstIndex(where: { $0.id == "\(name)|\(type)" }) else { return }
-                self.bonjourRaw[index].host = resolved.host
-                self.bonjourRaw[index].port = resolved.port
-            }
-        }
     }
 
     // MARK: - Off-actor discovery
@@ -284,18 +230,6 @@ final class LANScannerViewModel {
         return results
     }
 
-    private nonisolated static func resolveBonjour(_ services: [DiscoveredService]) async -> [LANMerge.BonjourHit] {
-        var hits: [LANMerge.BonjourHit] = []
-        for service in services {
-            guard let host = service.host else { continue }
-            let ip = LANDNS.isIPv4(host) ? host : LANDNS.resolveIPv4(host: host)
-            if let ip {
-                hits.append(LANMerge.BonjourHit(ip: ip, name: service.name, serviceLabel: service.friendly.label))
-            }
-        }
-        return hits
-    }
-
     private nonisolated static func reverseDNS(_ ips: [String]) async -> [String: String] {
         let unique = Array(Set(ips)).sorted()
         var map: [String: String] = [:]
@@ -306,59 +240,7 @@ final class LANScannerViewModel {
         return map
     }
 
-    // MARK: - Bonjour endpoint resolution
 
-    private nonisolated static func resolveEndpoint(
-        name: String, type: String, domain: String
-    ) async -> (host: String, port: UInt16)? {
-        await withCheckedContinuation { continuation in
-            let shot = OneShot(continuation)
-            let endpoint = NWEndpoint.service(name: name, type: type, domain: domain, interface: nil)
-            let connection = NWConnection(to: endpoint, using: .tcp)
-            let queue = DispatchQueue(label: "net.lan.resolve")
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if let remote = connection.currentPath?.remoteEndpoint,
-                       case let .hostPort(host, port) = remote {
-                        connection.cancel()
-                        shot.resume((hostString(host), port.rawValue))
-                    } else {
-                        connection.cancel()
-                        shot.resume(nil)
-                    }
-                case .failed, .cancelled:
-                    connection.cancel()
-                    shot.resume(nil)
-                default:
-                    break
-                }
-            }
-            connection.start(queue: queue)
-            queue.asyncAfter(deadline: .now() + 4) {
-                connection.cancel()
-                shot.resume(nil)
-            }
-        }
-    }
-
-    private nonisolated static func hostString(_ host: NWEndpoint.Host) -> String {
-        switch host {
-        case .ipv4(let address): return "\(address)".components(separatedBy: "%").first ?? "\(address)"
-        case .ipv6(let address): return "\(address)"
-        case .name(let name, _): return name
-        @unknown default: return "?"
-        }
-    }
-
-    private nonisolated static func service(from result: NWBrowser.Result) -> DiscoveredService? {
-        guard case let .service(name, type, domain, _) = result.endpoint else { return nil }
-        var txt: [String: String] = [:]
-        if case let .bonjour(record) = result.metadata {
-            txt = record.dictionary
-        }
-        return DiscoveredService(name: name, type: type, domain: domain, txt: txt)
-    }
 }
 
 struct LANScannerTool: NetworkTool {
