@@ -5,10 +5,12 @@ import Observation
 /// SMTP banners) — or the response to an optional probe line (e.g. an HTTP
 /// request). Uses the shared `TCPConnection`.
 struct BannerGrabService: Sendable {
-    func grab(host: String, port: UInt16, probe: String, tls: Bool, timeout: Double) async -> Result<String, EngineError> {
+    func grab(host: String, port: UInt16, probe: String, tls: Bool, timeout: Double, cancellation: NetworkCancellationHandle) async -> Result<String, EngineError> {
         guard let connection = TCPConnection(host: host, port: port, tls: tls) else {
             return .failure(EngineError(L10nString("banner.error.host")))
         }
+        cancellation.install { connection.cancel() }
+        if cancellation.isCancelled { return .failure(EngineError("Cancelled")) }
         if case .failure(let error) = await connection.open(timeout: timeout) {
             connection.cancel()
             return .failure(EngineError(error.localizedDescription))
@@ -19,6 +21,7 @@ struct BannerGrabService: Sendable {
         }
         let result = await connection.receiveBanner(timeout: timeout)
         connection.cancel()
+        cancellation.clear()
         switch result {
         case .success(let data):
             let text = String(decoding: data, as: UTF8.self)
@@ -61,7 +64,9 @@ final class BannerGrabViewModel {
             isRunning = false
             return
         }
-        let result = await service.grab(host: target, port: port, probe: probe, tls: tls, timeout: 5)
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
+        let result = await service.grab(host: target, port: port, probe: probe, tls: tls, timeout: 5, cancellation: cancellation)
         switch result {
         case .success(let text): output = text
         case .failure(let message): errorMessage = message.description
