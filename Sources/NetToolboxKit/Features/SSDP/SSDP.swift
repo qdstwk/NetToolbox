@@ -136,7 +136,11 @@ final class SSDPViewModel {
         guard !isScanning else { return }
         isScanning = true
         didScan = false
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "ssdp", target: "239.255.255.250:1900") }
+        catch { isScanning = false; didScan = true; return }
         devices = await SSDPEngine.discover(searchTarget: searchTarget, timeout: 4)
+        await UnifiedNetworkInterface.release(lease)
         didScan = true
         isScanning = false
     }
