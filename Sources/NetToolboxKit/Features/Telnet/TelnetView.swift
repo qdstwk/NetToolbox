@@ -22,7 +22,7 @@ final class TelnetViewModel {
 
     private var connection: TCPConnection?
     private var readTask: Task<Void, Never>?
-    private var networkLease: GlobalNetworkOperationGate.Lease?
+    private var networkLease: UnifiedNetworkInterface.Lease?
 
     func connect() async {
         let target = host.trimmingCharacters(in: .whitespaces)
@@ -36,16 +36,16 @@ final class TelnetViewModel {
         hasOutput = false
         statusMessage = nil
 
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "telnet", target: target)
+            lease = try await UnifiedNetworkInterface.claim(operation: "telnet", target: target)
         } catch {
             statusMessage = error.localizedDescription
             return
         }
 
         guard let connection = TCPConnection(host: target, port: port) else {
-            await GlobalNetworkOperationGate.shared.release(lease)
+            await UnifiedNetworkInterface.release(lease)
             statusMessage = String(localized: "error.probe.invalidHost", bundle: .module)
             return
         }
@@ -57,7 +57,7 @@ final class TelnetViewModel {
             isConnected = true
             startReading()
         case .failure(let error):
-            await GlobalNetworkOperationGate.shared.release(lease)
+            await UnifiedNetworkInterface.release(lease)
             statusMessage = error.localizedDescription
         }
     }
@@ -76,13 +76,13 @@ final class TelnetViewModel {
                     self?.appendOutput(processed.text)
                 }
             }
-            let lease = await MainActor.run { () -> GlobalNetworkOperationGate.Lease? in
+            let lease = await MainActor.run { () -> UnifiedNetworkInterface.Lease? in
                 let lease = self?.networkLease
                 self?.networkLease = nil
                 self?.isConnected = false
                 return lease
             }
-            if let lease { await GlobalNetworkOperationGate.shared.release(lease) }
+            if let lease { await UnifiedNetworkInterface.release(lease) }
         }
     }
 
@@ -108,7 +108,7 @@ final class TelnetViewModel {
         connection = nil
         if let lease = networkLease {
             networkLease = nil
-            Task { await GlobalNetworkOperationGate.shared.release(lease) }
+            Task { await UnifiedNetworkInterface.release(lease) }
         }
         isConnected = false
     }
