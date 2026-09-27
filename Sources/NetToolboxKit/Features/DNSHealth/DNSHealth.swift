@@ -69,26 +69,31 @@ final class DNSHealthViewModel {
         dnssec = .unknown
         results = DNSHealthEngine.resolvers.map { DNSResolverResult(name: $0.name, server: $0.ip) }
 
-        await withTaskGroup(of: (Int, DNSResolverResult).self) { group in
-            for (index, entry) in DNSHealthEngine.resolvers.enumerated() {
-                group.addTask {
-                    var result = DNSResolverResult(name: entry.name, server: entry.ip)
-                    do {
-                        let records = try await resolver.resolve(name: host, type: type, server: entry.ip)
-                        result.values = records.map(\.value).sorted()
-                        if result.values.isEmpty { result.error = L10nString("dnshealth.noanswer") }
-                    } catch {
-                        result.error = error.localizedDescription
-                    }
-                    return (index, result)
-                }
-            }
-            for await (index, result) in group where results.indices.contains(index) {
-                results[index] = result
-            }
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "dns-health", target: host)
+        } catch {
+            errorMessage = error.localizedDescription
+            isRunning = false
+            return
         }
+
+        for (index, entry) in DNSHealthEngine.resolvers.enumerated() {
+            guard isRunning else { break }
+            var result = DNSResolverResult(name: entry.name, server: entry.ip)
+            do {
+                let records = try await resolver.resolve(name: host, type: type, server: entry.ip)
+                result.values = records.map(\.value).sorted()
+                if result.values.isEmpty { result.error = L10nString("dnshealth.noanswer") }
+            } catch {
+                result.error = error.localizedDescription
+            }
+            if results.indices.contains(index) { results[index] = result }
+        }
+
         consistent = DNSHealthEngine.consistent(results)
         dnssec = await checkDNSSEC(host: host, type: type)
+        await GlobalNetworkOperationGate.shared.release(lease)
         hasRun = true
         isRunning = false
     }
