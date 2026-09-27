@@ -53,7 +53,7 @@ final class IPerf3ViewModel {
         await UnifiedNetworkInterface.registerCancellation(for: lease) { client.cancel() }
         phase = .connecting
         client.onEvent = { [weak self] event in
-            Task { @MainActor in self?.apply(event) }
+            Task { @MainActor in await self?.apply(event) }
         }
         client.start()
     }
@@ -65,18 +65,18 @@ final class IPerf3ViewModel {
         if isRunning { phase = .idle }
     }
 
-    private func apply(_ event: IPerf3Client.Event) {
+    private func apply(_ event: IPerf3Client.Event) async {
         switch event {
         case .connecting: phase = .connecting
         case .running(let mbps, let seconds): phase = .running(mbps: mbps, seconds: seconds)
         case .finished(let mbps, let bytes, let seconds):
             phase = .finished(mbps: mbps, bytes: bytes, seconds: seconds)
             client = nil
-            Task { await releaseLease() }
+            await releaseLease()
         case .failed(let message):
             phase = .failed(message)
             client = nil
-            Task { await releaseLease() }
+            await releaseLease()
         }
     }
 
