@@ -49,19 +49,38 @@ enum SpeedPhase: Sendable, Equatable {
 /// A multi-metric speed test (latency, jitter, download, upload) built on
 /// Cloudflare's open, key-less speed endpoints — the same infrastructure that
 /// backs speed.cloudflare.com. No external SDK.
-struct CloudflareSpeedEngine: Sendable {
+final class CloudflareSpeedEngine: @unchecked Sendable {
     private let downloadSeconds = 8.0
     private let uploadSeconds = 6.0
     private let warmupSeconds = 1.0
     /// Strict single-line policy: exactly one throughput request at a time.
     private let parallelStreams = 1
 
-    private var session: URLSession {
+    private let sessionLock = NSLock()
+    private var activeSession = CloudflareSpeedEngine.makeSession()
+
+    private static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 30
+        configuration.waitsForConnectivity = false
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         return URLSession(configuration: configuration)
+    }
+
+    private var session: URLSession {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        return activeSession
+    }
+
+    func cancelNetwork() {
+        sessionLock.lock()
+        let old = activeSession
+        activeSession = Self.makeSession()
+        sessionLock.unlock()
+        old.invalidateAndCancel()
     }
 
     func stream() -> AsyncThrowingStream<SpeedUpdate, Error> {
