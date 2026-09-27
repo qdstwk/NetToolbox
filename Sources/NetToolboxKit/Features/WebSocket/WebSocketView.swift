@@ -25,7 +25,7 @@ final class WebSocketViewModel {
     var toolID = ""
 
     private let client = WebSocketClient()
-    private var networkLease: GlobalNetworkOperationGate.Lease?
+    private var networkLease: UnifiedNetworkInterface.Lease?
 
     func connect() async {
         let trimmed = url.trimmingCharacters(in: .whitespaces)
@@ -33,9 +33,9 @@ final class WebSocketViewModel {
             append(.error, L10nString("websocket.error.url"))
             return
         }
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "websocket", target: target.host ?? trimmed)
+            lease = try await UnifiedNetworkInterface.claim(operation: "websocket", target: target.host ?? trimmed)
         } catch {
             append(.error, error.localizedDescription)
             return
@@ -74,7 +74,7 @@ final class WebSocketViewModel {
     private func releaseNetworkLease() {
         guard let lease = networkLease else { return }
         networkLease = nil
-        Task { await GlobalNetworkOperationGate.shared.release(lease) }
+        Task { await UnifiedNetworkInterface.release(lease) }
     }
 
     private func handle(_ event: WebSocketClient.Event) {
