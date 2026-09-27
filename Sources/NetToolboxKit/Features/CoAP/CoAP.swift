@@ -51,12 +51,14 @@ final class CoAPViewModel {
         let lease: UnifiedNetworkInterface.Lease
         do { lease = try await UnifiedNetworkInterface.claim(operation: "coap", target: target) }
         catch { errorMessage = error.localizedDescription; return }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         isRunning = true
         errorMessage = nil
         code = nil
         payload = ""
         let request = CoAP.get(path: path.trimmingCharacters(in: .whitespaces), messageID: UInt16.random(in: 0...UInt16.max))
-        let result = await UDPExchange.request(host: target, port: port, payload: request, timeout: 5)
+        let result = await UDPExchange.request(host: target, port: port, payload: request, timeout: 5, cancellation: cancellation)
         switch result {
         case .success(let data):
             if let parsed = CoAP.parse(data) {
