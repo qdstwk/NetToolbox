@@ -25,13 +25,22 @@ final class WebSocketViewModel {
     var toolID = ""
 
     private let client = WebSocketClient()
+    private var networkLease: GlobalNetworkOperationGate.Lease?
 
-    func connect() {
+    func connect() async {
         let trimmed = url.trimmingCharacters(in: .whitespaces)
         guard let target = URL(string: trimmed), target.scheme == "ws" || target.scheme == "wss" else {
             append(.error, L10nString("websocket.error.url"))
             return
         }
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "websocket", target: target.host ?? trimmed)
+        } catch {
+            append(.error, error.localizedDescription)
+            return
+        }
+        networkLease = lease
         client.onEvent = { [weak self] event in
             DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated { self?.handle(event) }
@@ -51,6 +60,7 @@ final class WebSocketViewModel {
 
     func disconnect() {
         client.disconnect()
+        releaseNetworkLease()
         if isConnected {
             isConnected = false
             append(.system, L10nString("websocket.status.closed"))
@@ -59,6 +69,12 @@ final class WebSocketViewModel {
 
     func clear() {
         transcript = []
+    }
+
+    private func releaseNetworkLease() {
+        guard let lease = networkLease else { return }
+        networkLease = nil
+        Task { await GlobalNetworkOperationGate.shared.release(lease) }
     }
 
     private func handle(_ event: WebSocketClient.Event) {
@@ -71,9 +87,11 @@ final class WebSocketViewModel {
         case .binary(let count):
             append(.received, "‹\(count) bytes›")
         case .closed(let reason):
+            releaseNetworkLease()
             isConnected = false
             append(.system, reason.map { "\(L10nString("websocket.status.closed")): \($0)" } ?? L10nString("websocket.status.closed"))
         case .error(let message):
+            releaseNetworkLease()
             isConnected = false
             append(.error, message)
         }
@@ -158,7 +176,7 @@ struct WebSocketView: View {
                 .buttonStyle(.bordered)
             } else {
                 Button {
-                    viewModel.connect()
+                    Task { await viewModel.connect() }
                 } label: {
                     Label(L10nString("websocket.action.connect"), systemImage: "bolt.horizontal")
                         .font(AppTypography.headline)
