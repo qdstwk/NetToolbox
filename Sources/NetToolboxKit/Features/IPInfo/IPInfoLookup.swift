@@ -44,7 +44,7 @@ struct IpwhoisLookupService: IPInfoProviding {
               let url = URL(string: "https://ipwho.is/\(encoded)") else {
             throw NetworkServiceError.invalidURL
         }
-        let data = try await client.data(from: url)
+        let (data, _) = try await UnifiedNetworkInterface.httpData(from: url, operation: "ip-info", target: trimmed)
         guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
             throw NetworkServiceError.decoding
         }
