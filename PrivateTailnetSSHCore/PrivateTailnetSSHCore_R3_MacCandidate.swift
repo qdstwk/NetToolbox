@@ -637,6 +637,21 @@ private actor SSHSendGate {
     }
 }
 
+private actor SSHReceiveGate {
+    private var busy = false
+
+    // receive-side state (inbound buffer + decrypt nonce/counter) is single-consumer.
+    // A second reader is a programming error: fail closed instead of queueing it,
+    // because two semantic readers would steal each other's SSH messages.
+    func claim() -> Bool {
+        guard !busy else { return false }
+        busy = true
+        return true
+    }
+
+    func release() { busy = false }
+}
+
 // MARK: - SSHClient
 
 /// Outcome of a one-shot SSH exec session.
@@ -666,6 +681,7 @@ enum SSHError: LocalizedError {
     case hostKeyChanged                       // 已固定的 Host Key 发生变化：硬阻断，绝不自动替换
     case authFailed
     case handshakeTimeout                    // TCP 已建立后，KEX/Host Key/NEWKEYS/userauth 超过总 deadline：强制关闭连接
+    case concurrentReceive                    // 同一 SSH client 出现第二个并发 reader：fail closed，防止 packet/nonce 状态被交叉消费
     case channelFailed
     case protocolError
     case encryptFailed
@@ -686,6 +702,7 @@ enum SSHError: LocalizedError {
         case .hostKeyChanged: return "SSH host key changed; password was not sent"
         case .authFailed: return "SSH authentication failed"
         case .handshakeTimeout: return "SSH handshake/authentication timed out"
+        case .concurrentReceive: return "Concurrent SSH receive is not allowed"
         case .channelFailed: return "SSH channel failed"
         case .protocolError: return "SSH protocol error"
         case .encryptFailed: return "SSH encryption failed"
@@ -739,6 +756,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
     private var encrypt: IntegratedSSHGCMCipher?
 // [ANNOTATION] 发送门保护 packet 顺序和 GCM nonce 的唯一消费；即使上层出现多个 Task，也不能绕过它直接并发写加密 packet。
     private let sendGate = SSHSendGate()       // 串行化所有 outbound packet，保护 AES-GCM nonce/counter 不发生并发复用
+    private let receiveGate = SSHReceiveGate() // receive 必须严格单 reader；第二 reader 直接拒绝而不是排队偷取 packet
 // [ANNOTATION] 这是 SSH 连接状态机的跨步骤状态；其生命周期覆盖后续 KEX/加密/channel 操作，不能在未理解状态转换的情况下重置或共享。
     private var decrypt: IntegratedSSHGCMCipher?
 // [ANNOTATION] 这是 SSH 连接状态机的跨步骤状态；其生命周期覆盖后续 KEX/加密/channel 操作，不能在未理解状态转换的情况下重置或共享。
@@ -1214,6 +1232,13 @@ final class IntegratedSSHClient: @unchecked Sendable {
     /// housekeeping messages and turning DISCONNECT into an error.
 // [ANNOTATION] 过滤 SSH transport housekeeping 消息；DISCONNECT 转成错误，IGNORE/DEBUG 跳过，GLOBAL_REQUEST 按 want-reply 必要时回复 failure。
     private func nextPayload() async throws -> Data {
+        guard await receiveGate.claim() else { throw SSHError.concurrentReceive }
+        defer { Task { await receiveGate.release() } }
+        return try await nextPayloadUnlocked()
+    }
+
+    // 仅允许 nextPayload() 在持有 receiveGate 时调用。
+    private func nextPayloadUnlocked() async throws -> Data {
         while true {
             let payload = try await receivePacket()
             guard let code = payload.first else { continue }
