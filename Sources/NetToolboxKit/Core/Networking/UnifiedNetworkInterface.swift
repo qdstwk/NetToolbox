@@ -26,6 +26,7 @@ enum UnifiedNetworkInterface {
     enum InterfaceError: LocalizedError, Sendable {
         case busy(operation: String, target: String)
         case foregroundRequired
+        case operationTimedOut(seconds: Double)
 
         var errorDescription: String? {
             switch self {
@@ -33,6 +34,8 @@ enum UnifiedNetworkInterface {
                 return "Another network operation is already active: \(operation) → \(target)"
             case .foregroundRequired:
                 return "Network operations are allowed only while the app is active in the foreground"
+            case .operationTimedOut(let seconds):
+                return "Network operation exceeded its (seconds)-second deadline"
             }
         }
     }
@@ -85,6 +88,16 @@ enum UnifiedNetworkInterface {
 
     private static let admission = Admission()
 
+    /// Hard ceilings for a single foreground operation. These are total
+    /// operation deadlines, not per-packet/per-read timeouts.
+    enum Deadline {
+        static let quick: Duration = .seconds(15)
+        static let standard: Duration = .seconds(30)
+        static let scan: Duration = .seconds(300)
+        static let speedTest: Duration = .seconds(90)
+        static let handshake: Duration = .seconds(30)
+    }
+
     static func claim(operation: String, target: String) async throws -> Lease {
         try await admission.claim(
             operation: operation,
@@ -103,6 +116,24 @@ enum UnifiedNetworkInterface {
         await admission.release(lease)
     }
 
+    static func withDeadline<T: Sendable>(
+        _ duration: Duration,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(for: duration)
+                throw InterfaceError.operationTimedOut(seconds: duration.secondsDouble)
+            }
+            guard let result = try await group.next() else {
+                throw CancellationError()
+            }
+            group.cancelAll()
+            return result
+        }
+    }
+
     static func activeOperation() async -> Lease? {
         await admission.snapshot()
     }
@@ -115,5 +146,13 @@ enum UnifiedNetworkInterface {
 
     private static func canonicalTarget(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
+
+private extension Duration {
+    var secondsDouble: Double {
+        let c = components
+        return Double(c.seconds) + Double(c.attoseconds) / 1_000_000_000_000_000_000
     }
 }
