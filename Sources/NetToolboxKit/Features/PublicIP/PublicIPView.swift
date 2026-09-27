@@ -20,7 +20,6 @@ struct PublicIPView: View {
         .background(theme.background)
         .navigationTitle(Text(L10n("tool.publicip.title")))
         .navigationBarTitleDisplayMode(.large)
-        .task { await viewModel.refresh() }
         .refreshable { await viewModel.refresh() }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -41,7 +40,13 @@ struct PublicIPView: View {
     private var publicSection: some View {
         SectionCard(title: L10n("publicip.section.public"), systemImage: "globe") {
             switch viewModel.state {
-            case .idle, .loading:
+            case .idle:
+                Text(L10n("common.refresh"))
+                    .font(AppTypography.body)
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, Spacing.lg)
+            case .loading:
                 HStack(spacing: Spacing.md) {
                     ProgressView()
                     Text(L10n("common.loading"))
