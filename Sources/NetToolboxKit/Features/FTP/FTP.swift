@@ -123,7 +123,11 @@ final class FTPViewModel {
             output = .failure(String(localized: "error.probe.invalidPort", bundle: .module))
             return
         }
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "ftp", target: target) }
+        catch { output = .failure(error.localizedDescription); return }
         guard let client = FTPClient(host: target, port: port) else {
+            await UnifiedNetworkInterface.release(lease)
             output = .failure(String(localized: "error.probe.invalidHost", bundle: .module))
             return
         }
@@ -135,6 +139,7 @@ final class FTPViewModel {
         case .failure(let error):
             output = .failure(error.localizedDescription)
         }
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
