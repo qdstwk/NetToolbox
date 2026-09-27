@@ -27,6 +27,7 @@ final class ASNInfoViewModel {
             isLoading = false
             return
         }
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { [service] in service.cancel() }
         do {
             result = try await service.lookupASN(value)
         } catch {
@@ -149,6 +150,7 @@ final class IPBGPViewModel {
             isLoading = false
             return
         }
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { [service] in service.cancel() }
         do {
             result = try await service.lookupIP(value)
         } catch {
