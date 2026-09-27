@@ -65,6 +65,14 @@ final class HTTPTimingViewModel {
         isRunning = true
         errorMessage = nil
         phases = []
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "http-timing", target: url)
+        } catch {
+            errorMessage = error.localizedDescription
+            isRunning = false
+            return
+        }
         do {
             let result = try await service.measure(urlString: url)
             phases = result.phases
@@ -73,6 +81,7 @@ final class HTTPTimingViewModel {
         } catch {
             errorMessage = error.localizedDescription
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
         isRunning = false
     }
 }
