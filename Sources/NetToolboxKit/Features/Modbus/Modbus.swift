@@ -46,7 +46,7 @@ struct ModbusService: Sendable {
             return .failure(EngineError(error.localizedDescription))
         }
         _ = await connection.send(Modbus.request(transaction: 1, unit: unit, function: function, address: address, quantity: quantity))
-        let result = await connection.receive()
+        let result = await connection.receive(timeout: 6)
         connection.cancel()
         cancellation.clear()
         switch result {
