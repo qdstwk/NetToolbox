@@ -38,6 +38,13 @@ final class MemcachedViewModel {
     func run() async {
         let target = host.trimmingCharacters(in: .whitespaces)
         guard !target.isEmpty, let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return }
+        let lease: UnifiedNetworkInterface.Lease
+        do {
+            lease = try await UnifiedNetworkInterface.claim(operation: "memcached", target: target)
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
         isRunning = true
         output = nil
         errorMessage = nil
@@ -47,6 +54,7 @@ final class MemcachedViewModel {
         case .failure(let message): errorMessage = message.description
         }
         isRunning = false
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
