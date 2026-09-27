@@ -161,9 +161,9 @@ final class TracerouteViewModel {
         tcpSummary = nil
         hops = []
 
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "traceroute", target: target)
+            lease = try await UnifiedNetworkInterface.claim(operation: "traceroute", target: target)
         } catch {
             errorMessage = error.localizedDescription
             isRunning = false
@@ -201,7 +201,7 @@ final class TracerouteViewModel {
             }
         }
 
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
         isRunning = false
         history.insert("\(target) — \(hops.count) hops\(reached ? " ✓" : "")", at: 0)
         if history.count > 10 { history.removeLast() }
