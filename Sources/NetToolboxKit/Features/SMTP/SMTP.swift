@@ -16,7 +16,7 @@ struct SMTPService: Sendable {
         }
         var log = ""
         func read() async {
-            if case .success(let data) = await connection.receive(), !data.isEmpty {
+            if case .success(let data) = await connection.receive(timeout: 6), !data.isEmpty {
                 log += "S: " + String(decoding: data, as: UTF8.self)
                 if !log.hasSuffix("\n") { log += "\n" }
             }
