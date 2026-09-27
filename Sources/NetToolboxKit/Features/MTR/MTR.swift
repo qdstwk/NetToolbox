@@ -82,6 +82,7 @@ final class MTRViewModel {
     private let prober: any TracerouteProbing
     private let resolver: any DNSResolving
     private var asnByAddress: [String: String] = [:]
+    private var currentCancellation: NetworkCancellationHandle?
 
     init(prober: any TracerouteProbing = ICMPTraceroute(), resolver: any DNSResolving = UDPDNSResolver()) {
         self.prober = prober
@@ -105,13 +106,16 @@ final class MTRViewModel {
         let lease: UnifiedNetworkInterface.Lease
         do { lease = try await UnifiedNetworkInterface.claim(operation: "mtr", target: target) }
         catch { errorMessage = error.localizedDescription; isRunning = false; return }
+        let cancellation = NetworkCancellationHandle()
+        currentCancellation = cancellation
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
 
-        while isRunning {
+        while isRunning && !cancellation.isCancelled {
             rounds += 1
             var results: [(Int, TracerouteHop)] = []
             for ttl in 1...lastHop {
                 guard isRunning else { break }
-                results.append((ttl, await prober.probe(host: target, ttl: ttl, timeout: timeout)))
+                results.append((ttl, await prober.probe(host: target, ttl: ttl, timeout: timeout, cancellation: cancellation)))
             }
             guard isRunning else { break }
 
@@ -130,11 +134,12 @@ final class MTRViewModel {
 
             try? await Task.sleep(for: .seconds(1))
         }
+        currentCancellation = nil
         await UnifiedNetworkInterface.release(lease)
         isRunning = false
     }
 
-    func stop() { isRunning = false }
+    func stop() { currentCancellation?.cancel(); isRunning = false }
 
     // MARK: - ASN enrichment
 
