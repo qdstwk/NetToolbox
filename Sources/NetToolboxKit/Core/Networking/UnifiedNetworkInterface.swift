@@ -134,6 +134,37 @@ enum UnifiedNetworkInterface {
         }
     }
 
+    static func httpData(
+        for request: URLRequest,
+        operation: String,
+        target: String? = nil
+    ) async throws -> (Data, URLResponse) {
+        let resolvedTarget = target ?? request.url?.host ?? request.url?.absoluteString ?? "http"
+        let lease = try await claim(operation: operation, target: resolvedTarget)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        configuration.waitsForConnectivity = false
+        let session = URLSession(configuration: configuration)
+        await registerCancellation(for: lease) { session.invalidateAndCancel() }
+        do {
+            let result = try await session.data(for: request)
+            await release(lease)
+            return result
+        } catch {
+            await release(lease)
+            throw error
+        }
+    }
+
+    static func httpData(
+        from url: URL,
+        operation: String,
+        target: String? = nil
+    ) async throws -> (Data, URLResponse) {
+        try await httpData(for: URLRequest(url: url), operation: operation, target: target)
+    }
+
     static func activeOperation() async -> Lease? {
         await admission.snapshot()
     }
