@@ -118,6 +118,14 @@ final class WorldPingViewModel {
         isRunning = true
         errorMessage = nil
         probes = []
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "world-ping", target: target)
+        } catch {
+            errorMessage = error.localizedDescription
+            isRunning = false
+            return
+        }
         do {
             let id = try await service.start(target: target, limit: limit, packets: packets)
             for _ in 0..<25 {
@@ -130,6 +138,7 @@ final class WorldPingViewModel {
         } catch {
             errorMessage = error.localizedDescription
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
         isRunning = false
     }
 
