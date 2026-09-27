@@ -50,9 +50,9 @@ final class DNSLookupViewModel {
         let type = self.type
         let server = self.server.trimmingCharacters(in: .whitespaces)
         output = .loading
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "dns-lookup", target: server)
+            lease = try await UnifiedNetworkInterface.claim(operation: "dns-lookup", target: server)
         } catch {
             output = .failure(error.localizedDescription)
             return
@@ -63,7 +63,7 @@ final class DNSLookupViewModel {
         } catch {
             output = .failure(error.localizedDescription)
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
