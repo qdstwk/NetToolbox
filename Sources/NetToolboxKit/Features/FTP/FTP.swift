@@ -97,7 +97,7 @@ final class FTPClient: @unchecked Sendable {
     }
 
     private func readReply() async -> String {
-        if case .success(let data) = await control.receive() {
+        if case .success(let data) = await control.receive(timeout: 8) {
             return String(decoding: data, as: UTF8.self)
         }
         return ""
