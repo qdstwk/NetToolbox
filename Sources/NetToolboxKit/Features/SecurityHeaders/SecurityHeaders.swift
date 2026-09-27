@@ -41,7 +41,13 @@ struct SecurityHeadersService: Sendable {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
 
-        let (_, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+        let lease = try await UnifiedNetworkInterface.claim(operation: "security-headers", target: url.host ?? text)
+        let session = URLSession(configuration: .ephemeral)
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { session.invalidateAndCancel() }
+        let response: URLResponse
+        do { (_, response) = try await session.data(for: request) }
+        catch { await UnifiedNetworkInterface.release(lease); throw error }
+        await UnifiedNetworkInterface.release(lease)
         guard let http = response as? HTTPURLResponse else { throw NetworkServiceError.decoding }
 
         var checks: [SecurityHeaderCheck] = []
