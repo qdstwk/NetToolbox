@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// A wall of every saved camera playing live at once, each in its own RTSP
-/// session. Sessions start on appear and stop on disappear so leaving the grid
-/// frees them.
+/// Saved-camera overview. Strict single-line network policy forbids
+/// starting multiple RTSP sessions at once; grid cells are metadata-only.
 @MainActor
 struct CameraGridView: View {
     @Environment(\.theme) private var theme
@@ -51,8 +50,9 @@ private struct CameraGridCell: View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
             ZStack {
                 Color.black
-                CameraPlayerView(session: session)
-                overlay
+                Image(systemName: "video")
+                    .font(.largeTitle)
+                    .foregroundStyle(.white.opacity(0.7))
             }
             .aspectRatio(16.0 / 9.0, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.medium, style: .continuous))
@@ -62,8 +62,7 @@ private struct CameraGridCell: View {
                 .foregroundStyle(theme.textSecondary)
                 .lineLimit(1)
         }
-        .task { session.play(camera) }
-        .onDisappear { session.stop() }
+
     }
 
     @ViewBuilder
