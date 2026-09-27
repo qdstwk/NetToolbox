@@ -526,8 +526,8 @@ enum IntegratedSSHCrypto {
         guard let key = SecKeyCreateWithData(der as CFData, attributes as CFDictionary, nil) else { return false }
         let algorithm: SecKeyAlgorithm
         switch sigType {
-        case "rsa-sha2-256": algorithm = .rsaSignatureDigestPKCS1v15SHA256
-        case "rsa-sha2-512": algorithm = .rsaSignatureDigestPKCS1v15SHA512
+        case "rsa-sha2-256": algorithm = .rsaSignatureMessagePKCS1v15SHA256
+        case "rsa-sha2-512": algorithm = .rsaSignatureMessagePKCS1v15SHA512
         default: return false
         }
         guard SecKeyIsAlgorithmSupported(key, .verify, algorithm) else { return false }
