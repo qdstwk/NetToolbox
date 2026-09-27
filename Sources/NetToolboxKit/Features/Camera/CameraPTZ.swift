@@ -43,6 +43,7 @@ final class PTZController {
             do { lease = try await UnifiedNetworkInterface.claim(operation: "camera-ptz", target: target) }
             catch { errorMessage = error.localizedDescription; return }
 
+            await UnifiedNetworkInterface.registerCancellation(for: lease) { client.cancelNetwork() }
             do {
                 try await client.continuousMove(profileToken: token, ptzXAddr: address, pan: pan, tilt: tilt, zoom: zoom)
             } catch { errorMessage = error.localizedDescription }
@@ -59,6 +60,7 @@ final class PTZController {
             do { lease = try await UnifiedNetworkInterface.claim(operation: "camera-ptz", target: target) }
             catch { errorMessage = error.localizedDescription; return }
 
+            await UnifiedNetworkInterface.registerCancellation(for: lease) { client.cancelNetwork() }
             try? await client.stopMove(profileToken: token, ptzXAddr: address)
             await UnifiedNetworkInterface.release(lease)
         }
@@ -73,6 +75,7 @@ final class PTZController {
             do { lease = try await UnifiedNetworkInterface.claim(operation: "camera-ptz", target: target) }
             catch { errorMessage = error.localizedDescription; return }
 
+            await UnifiedNetworkInterface.registerCancellation(for: lease) { client.cancelNetwork() }
             do {
                 try await client.gotoPreset(profileToken: token, ptzXAddr: address, presetToken: preset.token)
             } catch { errorMessage = error.localizedDescription }
