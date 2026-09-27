@@ -665,6 +665,7 @@ enum SSHError: LocalizedError {
     case hostKeyConfirmationRequired(PinnedSSHHostKey) // 首次连接：把指纹交给 UI，由用户确认后重连
     case hostKeyChanged                       // 已固定的 Host Key 发生变化：硬阻断，绝不自动替换
     case authFailed
+    case handshakeTimeout                    // TCP 已建立后，KEX/Host Key/NEWKEYS/userauth 超过总 deadline：强制关闭连接
     case channelFailed
     case protocolError
     case encryptFailed
@@ -684,6 +685,7 @@ enum SSHError: LocalizedError {
         case .hostKeyConfirmationRequired(let key): return "Confirm SSH host key before login: \(key.fingerprint)"
         case .hostKeyChanged: return "SSH host key changed; password was not sent"
         case .authFailed: return "SSH authentication failed"
+        case .handshakeTimeout: return "SSH handshake/authentication timed out"
         case .channelFailed: return "SSH channel failed"
         case .protocolError: return "SSH protocol error"
         case .encryptFailed: return "SSH encryption failed"
@@ -782,6 +784,34 @@ final class IntegratedSSHClient: @unchecked Sendable {
         case .failure(let error): throw SSHError.transport(error.localizedDescription)
         }
 
+        // TCP READY 以后仍必须有独立的总 deadline。仅取消 Swift Task 不足以保证
+        // Network.framework 的 pending receive 立即退出，因此 watchdog 到期时直接
+        // cancel 底层 NWConnection；这会打断 readLine/readExact/expect/authenticate。
+        let handshakeDeadline = max(timeout, 1.0)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(handshakeDeadline))
+        let watchdog = Task { [connection] in
+            do {
+                try await Task.sleep(for: .seconds(handshakeDeadline))
+                guard !Task.isCancelled else { return }
+                connection.cancel()
+            } catch {
+                // establish 正常结束时 watchdog 被 cancel；无需做任何事。
+            }
+        }
+        defer { watchdog.cancel() }
+
+        do {
+            try await establishAfterTCPReady(username: username, auth: auth)
+        } catch {
+            if clock.now >= deadline { throw SSHError.handshakeTimeout }
+            throw error
+        }
+        if clock.now >= deadline { throw SSHError.handshakeTimeout }
+    }
+
+    // TCP 已经 READY；本函数中的所有网络等待均受 establish() 的 watchdog 约束。
+    private func establishAfterTCPReady(username: String, auth: SSHAuth) async throws {
         let clientVersion = "SSH-2.0-NetToolbox_1.0"
         try await writeRaw(Data((clientVersion + "\r\n").utf8))
         var serverVersion = ""
