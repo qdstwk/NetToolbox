@@ -35,10 +35,12 @@ enum Modbus {
 }
 
 struct ModbusService: Sendable {
-    func read(host: String, port: UInt16, unit: UInt8, function: UInt8, address: UInt16, quantity: UInt16) async -> Result<[UInt16], EngineError> {
+    func read(host: String, port: UInt16, unit: UInt8, function: UInt8, address: UInt16, quantity: UInt16, cancellation: NetworkCancellationHandle) async -> Result<[UInt16], EngineError> {
         guard let connection = TCPConnection(host: host, port: port) else {
             return .failure(EngineError(L10nString("banner.error.host")))
         }
+        cancellation.install { connection.cancel() }
+        if cancellation.isCancelled { return .failure(EngineError("Cancelled")) }
         if case .failure(let error) = await connection.open(timeout: 6) {
             connection.cancel()
             return .failure(EngineError(error.localizedDescription))
@@ -46,6 +48,7 @@ struct ModbusService: Sendable {
         _ = await connection.send(Modbus.request(transaction: 1, unit: unit, function: function, address: address, quantity: quantity))
         let result = await connection.receive()
         connection.cancel()
+        cancellation.clear()
         switch result {
         case .success(let data):
             switch Modbus.parse(data) {
@@ -84,6 +87,8 @@ final class ModbusViewModel {
             errorMessage = error.localizedDescription
             return
         }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         isRunning = true
         errorMessage = nil
         registers = []
@@ -92,7 +97,8 @@ final class ModbusViewModel {
             unit: UInt8(unitText.trimmingCharacters(in: .whitespaces)) ?? 1,
             function: function == 4 ? 4 : 3,
             address: UInt16(addressText.trimmingCharacters(in: .whitespaces)) ?? 0,
-            quantity: max(1, min(125, UInt16(quantityText.trimmingCharacters(in: .whitespaces)) ?? 10))
+            quantity: max(1, min(125, UInt16(quantityText.trimmingCharacters(in: .whitespaces)) ?? 10)),
+            cancellation: cancellation
         )
         switch result {
         case .success(let regs): registers = regs
