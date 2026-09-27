@@ -73,7 +73,26 @@ final class PingViewModel {
         currentCancellation = cancellation
         await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
 
-        guard let resolved = ICMPPingEngine.resolve(host: target, preferIPv6: preferIPv6) else {
+        let resolved: ICMPPingEngine.Target?
+        if InputClassifier.isIPv4(target) {
+            resolved = .init(ip: target, isIPv6: false)
+        } else if target.contains(":") {
+            resolved = .init(ip: target, isIPv6: true)
+        } else {
+            let dns = UDPDNSResolver()
+            let firstType: DNSRecordType = preferIPv6 ? .aaaa : .a
+            let secondType: DNSRecordType = preferIPv6 ? .a : .aaaa
+            let first = (try? await dns.resolve(name: target, type: firstType, server: "1.1.1.1", cancellation: cancellation)) ?? []
+            let second = first.isEmpty && !cancellation.isCancelled
+                ? ((try? await dns.resolve(name: target, type: secondType, server: "1.1.1.1", cancellation: cancellation)) ?? [])
+                : []
+            if let value = (first.first ?? second.first)?.value {
+                resolved = .init(ip: value, isIPv6: value.contains(":"))
+            } else {
+                resolved = nil
+            }
+        }
+        guard let resolved else {
             errorMessage = L10nString("ping.error.resolve")
             currentCancellation = nil
             await UnifiedNetworkInterface.release(lease)
