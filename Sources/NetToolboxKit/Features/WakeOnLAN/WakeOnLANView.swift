@@ -21,9 +21,9 @@ final class WakeOnLANViewModel {
         let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) ?? 9
         let broadcastAddress = broadcast.trimmingCharacters(in: .whitespaces)
 
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "wake-on-lan", target: broadcastAddress)
+            lease = try await UnifiedNetworkInterface.claim(operation: "wake-on-lan", target: broadcastAddress)
         } catch {
             output = .failure(error.localizedDescription)
             return
@@ -35,7 +35,7 @@ final class WakeOnLANViewModel {
         case .failure(let error):
             output = .failure(error.localizedDescription)
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
