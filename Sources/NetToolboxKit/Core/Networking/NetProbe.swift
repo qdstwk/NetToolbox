@@ -277,7 +277,8 @@ final class TCPConnection: @unchecked Sendable {
 /// Used by the DNS and SNMP tools.
 enum UDPExchange {
     static func request(
-        host: String, port: UInt16, payload: Data, timeout: Double
+        host: String, port: UInt16, payload: Data, timeout: Double,
+        cancellation: NetworkCancellationHandle? = nil
     ) async -> Result<Data, NetProbeError> {
         await withCheckedContinuation { continuation in
             let shot = OneShot(continuation)
@@ -295,17 +296,24 @@ enum UDPExchange {
                 host: NWEndpoint.Host(host), port: nwPort, using: .udp
             )
             let queue = DispatchQueue(label: "net.probe.udp")
+            cancellation?.install {
+                connection.cancel()
+                shot.resume(.failure(.cancelled))
+            }
+            if cancellation?.isCancelled == true { return }
 
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
                     connection.send(content: payload, completion: .contentProcessed { error in
                         if let error {
+                            cancellation?.clear()
                             connection.cancel()
                             shot.resume(.failure(.connection(error.localizedDescription)))
                             return
                         }
                         connection.receiveMessage { data, _, _, receiveError in
+                            cancellation?.clear()
                             connection.cancel()
                             if let receiveError {
                                 shot.resume(.failure(.connection(receiveError.localizedDescription)))
@@ -317,6 +325,7 @@ enum UDPExchange {
                         }
                     })
                 case .failed(let error):
+                    cancellation?.clear()
                     connection.cancel()
                     shot.resume(.failure(.connection(error.localizedDescription)))
                 default:
@@ -325,6 +334,7 @@ enum UDPExchange {
             }
             connection.start(queue: queue)
             queue.asyncAfter(deadline: .now() + timeout) {
+                cancellation?.clear()
                 connection.cancel()
                 shot.resume(.failure(.timeout))
             }
