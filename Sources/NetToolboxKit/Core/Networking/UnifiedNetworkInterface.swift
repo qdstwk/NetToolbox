@@ -10,6 +10,45 @@ import Foundation
 ///
 /// Transport implementations (TCP/UDP/HTTP/TLS) remain protocol-specific,
 /// but Features must enter the network through this interface first.
+final class NetworkCancellationHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var current: (@Sendable () -> Void)?
+
+    func install(_ action: @escaping @Sendable () -> Void) {
+        lock.lock()
+        if cancelled {
+            lock.unlock()
+            action()
+            return
+        }
+        current = action
+        lock.unlock()
+    }
+
+    func clear() {
+        lock.lock()
+        current = nil
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        guard !cancelled else { lock.unlock(); return }
+        cancelled = true
+        let action = current
+        current = nil
+        lock.unlock()
+        action?()
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+}
+
 enum UnifiedNetworkInterface {
     struct Lease: Sendable, Equatable {
         fileprivate let id: UUID
