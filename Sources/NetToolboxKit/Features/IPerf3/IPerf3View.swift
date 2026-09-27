@@ -26,17 +26,22 @@ final class IPerf3ViewModel {
     private(set) var phase: Phase = .idle
 
     private var client: IPerf3Client?
+    private var networkLease: UnifiedNetworkInterface.Lease?
 
     var isRunning: Bool {
         switch phase { case .connecting, .running: return true; default: return false }
     }
 
-    func run() {
+    func run() async {
         let target = host.trimmingCharacters(in: .whitespaces)
         guard !target.isEmpty else { phase = .failed(L10nString("iperf3.error.host")); return }
         let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) ?? 5201
         let seconds = max(1, min(60, Int(secondsText.trimmingCharacters(in: .whitespaces)) ?? 10))
-        let parallel = max(1, min(16, Int(parallelText.trimmingCharacters(in: .whitespaces)) ?? 1))
+        let parallel = 1  // strict single-line network policy
+
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "iperf3", target: target) }
+        catch { phase = .failed(error.localizedDescription); return }
 
         let config = IPerf3Client.Config(
             host: target, port: port, seconds: seconds,
@@ -44,6 +49,8 @@ final class IPerf3ViewModel {
         )
         let client = IPerf3Client(config: config)
         self.client = client
+        networkLease = lease
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { client.cancel() }
         phase = .connecting
         client.onEvent = { [weak self] event in
             Task { @MainActor in self?.apply(event) }
@@ -54,6 +61,7 @@ final class IPerf3ViewModel {
     func stop() {
         client?.cancel()
         client = nil
+        releaseLease()
         if isRunning { phase = .idle }
     }
 
@@ -64,10 +72,18 @@ final class IPerf3ViewModel {
         case .finished(let mbps, let bytes, let seconds):
             phase = .finished(mbps: mbps, bytes: bytes, seconds: seconds)
             client = nil
+            releaseLease()
         case .failed(let message):
             phase = .failed(message)
             client = nil
+            releaseLease()
         }
+    }
+
+    private func releaseLease() {
+        guard let lease = networkLease else { return }
+        networkLease = nil
+        Task { await UnifiedNetworkInterface.release(lease) }
     }
 }
 
@@ -171,7 +187,7 @@ struct IPerf3View: View {
                 .buttonStyle(.borderedProminent)
             } else {
                 Button {
-                    viewModel.run()
+                    Task { await viewModel.run() }
                 } label: {
                     Label(L10nString("iperf3.action.run"), systemImage: "play.fill")
                         .font(AppTypography.headline)
