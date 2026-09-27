@@ -10,6 +10,7 @@ final class PTZController {
     private var client: ONVIFClient
     private let ptzXAddr: String
     private let profileToken: String
+    private let target: String
 
     private(set) var presets: [ONVIFPreset] = []
     private(set) var ready = false
@@ -24,12 +25,13 @@ final class PTZController {
         )
         self.ptzXAddr = ptzXAddr
         self.profileToken = profileToken
+        self.target = camera.host.trimmingCharacters(in: .whitespaces)
     }
 
     func prepare() async {
-        client.clockOffset = await client.measureClockOffset()
+        // Do not perform automatic network I/O merely because the PTZ view appears.
+        // Under strict single-line mode every PTZ network action is explicit.
         ready = true
-        presets = (try? await client.getPresets(profileToken: profileToken, ptzXAddr: ptzXAddr)) ?? []
     }
 
     func move(pan: Double, tilt: Double, zoom: Double) {
@@ -37,11 +39,13 @@ final class PTZController {
         let token = profileToken
         let address = ptzXAddr
         Task {
+            let lease: UnifiedNetworkInterface.Lease
+            do { lease = try await UnifiedNetworkInterface.claim(operation: "camera-ptz", target: target) }
+            catch { errorMessage = error.localizedDescription; return }
+            defer { Task { await UnifiedNetworkInterface.release(lease) } }
             do {
                 try await client.continuousMove(profileToken: token, ptzXAddr: address, pan: pan, tilt: tilt, zoom: zoom)
-            } catch {
-                errorMessage = error.localizedDescription
-            }
+            } catch { errorMessage = error.localizedDescription }
         }
     }
 
@@ -49,7 +53,13 @@ final class PTZController {
         let client = client
         let token = profileToken
         let address = ptzXAddr
-        Task { try? await client.stopMove(profileToken: token, ptzXAddr: address) }
+        Task {
+            let lease: UnifiedNetworkInterface.Lease
+            do { lease = try await UnifiedNetworkInterface.claim(operation: "camera-ptz", target: target) }
+            catch { errorMessage = error.localizedDescription; return }
+            defer { Task { await UnifiedNetworkInterface.release(lease) } }
+            try? await client.stopMove(profileToken: token, ptzXAddr: address)
+        }
     }
 
     func goto(_ preset: ONVIFPreset) {
@@ -57,11 +67,13 @@ final class PTZController {
         let token = profileToken
         let address = ptzXAddr
         Task {
+            let lease: UnifiedNetworkInterface.Lease
+            do { lease = try await UnifiedNetworkInterface.claim(operation: "camera-ptz", target: target) }
+            catch { errorMessage = error.localizedDescription; return }
+            defer { Task { await UnifiedNetworkInterface.release(lease) } }
             do {
                 try await client.gotoPreset(profileToken: token, ptzXAddr: address, presetToken: preset.token)
-            } catch {
-                errorMessage = error.localizedDescription
-            }
+            } catch { errorMessage = error.localizedDescription }
         }
     }
 }
