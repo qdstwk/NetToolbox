@@ -42,7 +42,14 @@ struct PwnedService: Sendable {
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
         request.setValue("true", forHTTPHeaderField: "Add-Padding")
-        let (data, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+        let lease = try await UnifiedNetworkInterface.claim(operation: "pwned-check", target: prefix)
+        let session = URLSession(configuration: .ephemeral)
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { session.invalidateAndCancel() }
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch { await UnifiedNetworkInterface.release(lease); throw error }
+        await UnifiedNetworkInterface.release(lease)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw NetworkServiceError.badStatus(http.statusCode)
         }
