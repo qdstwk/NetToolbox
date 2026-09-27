@@ -53,9 +53,9 @@ final class BannerGrabViewModel {
         isRunning = true
         output = nil
         errorMessage = nil
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "banner-grab", target: target)
+            lease = try await UnifiedNetworkInterface.claim(operation: "banner-grab", target: target)
         } catch {
             errorMessage = error.localizedDescription
             isRunning = false
@@ -66,7 +66,7 @@ final class BannerGrabViewModel {
         case .success(let text): output = text
         case .failure(let message): errorMessage = message.description
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
         isRunning = false
     }
 }
