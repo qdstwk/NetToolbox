@@ -67,7 +67,7 @@ struct IpwhoisService: PublicIPProviding {
         guard let url = URL(string: "https://ipwho.is/") else {
             throw NetworkServiceError.invalidURL
         }
-        let data = try await client.data(from: url)
+        let (data, _) = try await UnifiedNetworkInterface.httpData(from: url, operation: "public-ip", target: "ipwho.is")
         guard let decoded = try? JSONDecoder().decode(Response.self, from: data),
               decoded.success
         else { throw NetworkServiceError.decoding }
