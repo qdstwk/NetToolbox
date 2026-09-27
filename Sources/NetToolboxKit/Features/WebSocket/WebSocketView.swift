@@ -41,6 +41,7 @@ final class WebSocketViewModel {
             return
         }
         networkLease = lease
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { [client] in client.disconnect() }
         client.onEvent = { [weak self] event in
             DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated { self?.handle(event) }
