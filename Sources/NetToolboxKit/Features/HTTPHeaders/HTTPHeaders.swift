@@ -91,6 +91,7 @@ final class HTTPHeadersViewModel {
         } catch {
             output = .failure(error.localizedDescription)
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
     }
 }
 
