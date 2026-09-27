@@ -158,8 +158,10 @@ final class IPRangeScannerViewModel {
         await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
 
         // Strict single-line policy: one host, one probe method, at a time.
+        let scanClock = ContinuousClock()
+        let scanStart = scanClock.now
         for ip in hosts {
-            guard isScanning else { break }
+            guard isScanning, scanStart.duration(to: scanClock.now) < UnifiedNetworkInterface.Deadline.scan else { break }
             var rtt = await ICMPHostPinger.probe(ip: ip, timeout: 0.9, cancellation: cancellation)
             if rtt == nil {
                 rtt = await TCPHostProbe.probe(ip: ip, timeout: 0.9, cancellation: cancellation)
