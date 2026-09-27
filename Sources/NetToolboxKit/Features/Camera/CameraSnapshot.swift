@@ -9,6 +9,7 @@ struct SnapshotFetcher: Sendable {
 
     func fetch(_ uri: String) async throws -> Data {
         guard let url = URL(string: uri) else { throw ONVIFError.network }
+        let lease = try await UnifiedNetworkInterface.claim(operation: "camera-snapshot", target: url.host ?? uri)
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
 
@@ -21,8 +22,10 @@ struct SnapshotFetcher: Sendable {
             }
         }
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), !data.isEmpty else {
+            await UnifiedNetworkInterface.release(lease)
             throw ONVIFError.unauthorized
         }
+        await UnifiedNetworkInterface.release(lease)
         return data
     }
 
