@@ -28,6 +28,7 @@ final class CameraSession {
     var lastRecordingURL: URL?
 
     private var client: RTSPClient?
+    private var networkLease: UnifiedNetworkInterface.Lease?
     private let recorder = CameraRecorder()
     private weak var displayLayer: AVSampleBufferDisplayLayer?
 
@@ -44,13 +45,22 @@ final class CameraSession {
     }
 
     func play(_ camera: CameraStore.Camera) {
+        Task { await playExclusive(camera) }
+    }
+
+    private func playExclusive(_ camera: CameraStore.Camera) async {
         stop()
         self.camera = camera
         phase = .connecting
         activity?.start(toolID)
         displayLayer?.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
 
-        let port = UInt16(camera.rtspPort.trimmingCharacters(in: .whitespaces)) ?? 554
+        let target = camera.host.trimmingCharacters(in: .whitespaces)
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "camera-rtsp", target: target) }
+        catch { phase = .failed(error.localizedDescription); activity?.stop(toolID); return }
+        networkLease = lease
+                let port = UInt16(camera.rtspPort.trimmingCharacters(in: .whitespaces)) ?? 554
         let client = RTSPClient(
             host: camera.host.trimmingCharacters(in: .whitespaces),
             port: port,
@@ -70,6 +80,7 @@ final class CameraSession {
             }
         }
         self.client = client
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { client.stop() }
         client.start()
     }
 
@@ -79,6 +90,10 @@ final class CameraSession {
         }
         client?.stop()
         client = nil
+        if let lease = networkLease {
+            networkLease = nil
+            Task { await UnifiedNetworkInterface.release(lease) }
+        }
         if isActive { phase = .stopped }
         activity?.stop(toolID)
         displayLayer?.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
@@ -109,12 +124,20 @@ final class CameraSession {
         case .playing:
             phase = .playing
         case .stopped:
+            releaseNetworkLease()
             if isActive { phase = .stopped }
             activity?.stop(toolID)
         case .failed(let message):
+            releaseNetworkLease()
             phase = .failed(message)
             activity?.stop(toolID)
         }
+    }
+
+    private func releaseNetworkLease() {
+        guard let lease = networkLease else { return }
+        networkLease = nil
+        Task { await UnifiedNetworkInterface.release(lease) }
     }
 
     private func enqueue(_ sample: CMSampleBuffer) {
