@@ -10,8 +10,12 @@ protocol SNMPQuerying: Sendable {
 
 struct SNMPService: SNMPQuerying {
     func get(host: String, community: String, oid: String, port: UInt16) async throws -> SNMPVarbind {
+        try await get(host: host, community: community, oid: oid, port: port, cancellation: nil)
+    }
+
+    func get(host: String, community: String, oid: String, port: UInt16, cancellation: NetworkCancellationHandle?) async throws -> SNMPVarbind {
         let request = try SNMPMessage.encodeGet(oid: oid, community: community, requestID: 1)
-        let response = await UDPExchange.request(host: host, port: port, payload: request, timeout: 5)
+        let response = await UDPExchange.request(host: host, port: port, payload: request, timeout: 5, cancellation: cancellation)
         switch response {
         case .success(let data): return try SNMPMessage.decodeResponse(data)
         case .failure(let error): throw error
@@ -19,6 +23,10 @@ struct SNMPService: SNMPQuerying {
     }
 
     func walk(host: String, community: String, oid: String, port: UInt16) async throws -> [SNMPVarbind] {
+        try await walk(host: host, community: community, oid: oid, port: port, cancellation: nil)
+    }
+
+    func walk(host: String, community: String, oid: String, port: UInt16, cancellation: NetworkCancellationHandle?) async throws -> [SNMPVarbind] {
         var results: [SNMPVarbind] = []
         var current = oid
         var requestID = 1
@@ -26,7 +34,7 @@ struct SNMPService: SNMPQuerying {
         for _ in 0..<256 {
             let request = try SNMPMessage.encodeGetNext(oid: current, community: community, requestID: requestID)
             requestID += 1
-            let response = await UDPExchange.request(host: host, port: port, payload: request, timeout: 5)
+            let response = await UDPExchange.request(host: host, port: port, payload: request, timeout: 5, cancellation: cancellation)
             guard case .success(let data) = response,
                   let varbind = try? SNMPMessage.decodeResponse(data) else { break }
             // Stop when the walk leaves the requested subtree or stops advancing.
@@ -101,6 +109,8 @@ final class SNMPViewModel {
         let lease: UnifiedNetworkInterface.Lease
         do { lease = try await UnifiedNetworkInterface.claim(operation: "snmp", target: target) }
         catch { output = .failure(error.localizedDescription); return }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         let oid = oid.trimmingCharacters(in: .whitespaces)
         output = .loading
         do {
@@ -113,7 +123,7 @@ final class SNMPViewModel {
                 }
                 let varbind = try await v3Service.get(
                     host: target, port: port, user: user,
-                    password: authPassword, auth: authProtocol, oid: oid
+                    password: authPassword, auth: authProtocol, oid: oid, cancellation: cancellation
                 )
                 output = .get(varbind)
                 await UnifiedNetworkInterface.release(lease)
@@ -122,9 +132,17 @@ final class SNMPViewModel {
             let community = community.trimmingCharacters(in: .whitespaces)
             switch mode {
             case .get:
-                output = .get(try await service.get(host: target, community: community, oid: oid, port: port))
+                if let snmp = service as? SNMPService {
+                    output = .get(try await snmp.get(host: target, community: community, oid: oid, port: port, cancellation: cancellation))
+                } else {
+                    output = .get(try await service.get(host: target, community: community, oid: oid, port: port))
+                }
             case .walk:
-                output = .walk(try await service.walk(host: target, community: community, oid: oid, port: port))
+                if let snmp = service as? SNMPService {
+                    output = .walk(try await snmp.walk(host: target, community: community, oid: oid, port: port, cancellation: cancellation))
+                } else {
+                    output = .walk(try await service.walk(host: target, community: community, oid: oid, port: port))
+                }
             }
         } catch {
             output = .failure(error.localizedDescription)
