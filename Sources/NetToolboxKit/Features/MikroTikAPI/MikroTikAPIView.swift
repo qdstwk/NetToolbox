@@ -234,12 +234,12 @@ final class MikroTikViewModel {
 
     func clearTranscript() { transcript.removeAll() }
 
-    func disconnect() {
+    func disconnect() async {
         client?.cancel()
         client = nil
         if let lease = networkLease {
             networkLease = nil
-            Task { await UnifiedNetworkInterface.release(lease) }
+            await UnifiedNetworkInterface.release(lease)
         }
         isConnected = false
     }
@@ -344,7 +344,7 @@ struct MikroTikAPIView: View {
             HStack {
                 if viewModel.isConnected {
                     Button(L10nString("telnet.disconnect"), role: .destructive) {
-                        viewModel.disconnect()
+                        Task { await viewModel.disconnect() }
                     }
                     .buttonStyle(.borderedProminent)
                     StatusBadge(kind: .success, text: L10n("telnet.connected"))
