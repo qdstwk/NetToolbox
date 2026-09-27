@@ -77,6 +77,13 @@ final class ModbusViewModel {
     func run() async {
         let target = host.trimmingCharacters(in: .whitespaces)
         guard !target.isEmpty, let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return }
+        let lease: UnifiedNetworkInterface.Lease
+        do {
+            lease = try await UnifiedNetworkInterface.claim(operation: "modbus", target: target)
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
         isRunning = true
         errorMessage = nil
         registers = []
@@ -92,6 +99,7 @@ final class ModbusViewModel {
         case .failure(let message): errorMessage = message.description
         }
         isRunning = false
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
