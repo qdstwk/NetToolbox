@@ -40,14 +40,20 @@ final class SyslogViewModel {
     var toolID = ""
 
     private let listener = UDPListener()
+    private var networkLease: UnifiedNetworkInterface.Lease?
 
-    func toggle() {
-        if isListening { stop() } else { start() }
+    func toggle() async {
+        if isListening { await stop() } else { await start() }
     }
 
-    private func start() {
+    private func start() async {
         guard let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return }
         errorMessage = nil
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "syslog-listen", target: "udp-listener:\(port)") }
+        catch { errorMessage = error.localizedDescription; return }
+        networkLease = lease
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { [listener] in listener.stop() }
         listener.onReady = { [weak self] in
             Task { @MainActor [weak self] in self?.isListening = true }
         }
@@ -60,8 +66,9 @@ final class SyslogViewModel {
         listener.start(port: port)
     }
 
-    func stop() {
+    func stop() async {
         listener.stop()
+        if let lease = networkLease { networkLease = nil; await UnifiedNetworkInterface.release(lease) }
         isListening = false
     }
 
@@ -125,7 +132,7 @@ struct SyslogView: View {
                     .environment(\.layoutDirection, .leftToRight)
                     .disabled(viewModel.isListening)
                 Button {
-                    viewModel.toggle()
+                    Task { await viewModel.toggle() }
                 } label: {
                     Label(
                         L10nString(viewModel.isListening ? "syslog.action.stop" : "syslog.action.listen"),
