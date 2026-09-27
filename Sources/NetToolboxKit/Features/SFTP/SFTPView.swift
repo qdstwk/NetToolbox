@@ -44,6 +44,10 @@ final class SFTPViewModel {
             errorMessage = L10nString("error.probe.invalidHost")
             return
         }
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "sftp-list", target: target) }
+        catch { errorMessage = error.localizedDescription; return }
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { client.close() }
         isBusy = true
         errorMessage = nil
         downloadURL = nil
@@ -53,6 +57,8 @@ final class SFTPViewModel {
         } catch {
             errorMessage = error.localizedDescription + "\n\(client.diagnostics) · stage=\(client.stage)"
         }
+        client.close()
+        await UnifiedNetworkInterface.release(lease)
         isBusy = false
     }
 
@@ -70,6 +76,10 @@ final class SFTPViewModel {
         guard let port = UInt16(portText.trimmingCharacters(in: .whitespaces)),
               let auth = makeAuth(),
               let client = SSHClient(host: target, port: port) else { return }
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "sftp-download", target: target) }
+        catch { errorMessage = error.localizedDescription; return }
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { client.close() }
         isBusy = true
         errorMessage = nil
         do {
@@ -80,6 +90,8 @@ final class SFTPViewModel {
         } catch {
             errorMessage = error.localizedDescription
         }
+        client.close()
+        await UnifiedNetworkInterface.release(lease)
         isBusy = false
     }
 
