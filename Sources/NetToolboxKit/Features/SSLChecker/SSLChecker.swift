@@ -56,13 +56,35 @@ protocol SSLInspecting: Sendable {
     func inspect(host: String, port: UInt16) async -> Result<SSLCertInfo, NetProbeError>
     /// Which of TLS 1.0–1.3 the server completes a handshake with.
     func probeProtocols(host: String, port: UInt16) async -> [String]
+    func cancel()
 }
 
 extension SSLInspecting {
     func probeProtocols(host: String, port: UInt16) async -> [String] { [] }
+    func cancel() {}
 }
 
-struct SSLInspector: SSLInspecting {
+final class SSLInspector: SSLInspecting, @unchecked Sendable {
+    private let connectionLock = NSLock()
+    private var activeConnection: NWConnection?
+
+    func cancel() {
+        connectionLock.lock()
+        let connection = activeConnection
+        activeConnection = nil
+        connectionLock.unlock()
+        connection?.cancel()
+    }
+
+    private func track(_ connection: NWConnection) {
+        connectionLock.lock(); activeConnection = connection; connectionLock.unlock()
+    }
+
+    private func clear(_ connection: NWConnection) {
+        connectionLock.lock()
+        if activeConnection === connection { activeConnection = nil }
+        connectionLock.unlock()
+    }
     func inspect(host: String, port: UInt16) async -> Result<SSLCertInfo, NetProbeError> {
         await withCheckedContinuation { continuation in
             let shot = OneShot(continuation)
@@ -93,11 +115,14 @@ struct SSLInspector: SSLInspecting {
 
             let parameters = NWParameters(tls: tlsOptions)
             let connection = NWConnection(host: NWEndpoint.Host(cleanHost), port: nwPort, using: parameters)
+            self.track(connection)
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
+                    self.clear(connection)
                     connection.cancel()
                 case .failed(let error), .waiting(let error):
+                    self.clear(connection)
                     connection.cancel()
                     shot.resume(.failure(.connection(error.localizedDescription)))
                 default:
@@ -106,6 +131,7 @@ struct SSLInspector: SSLInspecting {
             }
             connection.start(queue: queue)
             queue.asyncAfter(deadline: .now() + 10) {
+                self.clear(connection)
                 connection.cancel()
                 shot.resume(.failure(.timeout))
             }
@@ -201,15 +227,16 @@ struct SSLInspector: SSLInspecting {
             )
             let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort,
                                           using: NWParameters(tls: tls))
+            self.track(connection)
             connection.stateUpdateHandler = { state in
                 switch state {
-                case .ready: connection.cancel(); shot.resume(true)
-                case .failed, .waiting: connection.cancel(); shot.resume(false)
+                case .ready: self.clear(connection); connection.cancel(); shot.resume(true)
+                case .failed, .waiting: self.clear(connection); connection.cancel(); shot.resume(false)
                 default: break
                 }
             }
             connection.start(queue: queue)
-            queue.asyncAfter(deadline: .now() + 8) { connection.cancel(); shot.resume(false) }
+            queue.asyncAfter(deadline: .now() + 8) { self.clear(connection); connection.cancel(); shot.resume(false) }
         }
     }
 }
@@ -256,6 +283,7 @@ final class SSLCheckerViewModel {
             output = .failure(error.localizedDescription)
             return
         }
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { [inspector] in inspector.cancel() }
         let result = await inspector.inspect(host: trimmed, port: port)
         switch result {
         case .success(let info):
