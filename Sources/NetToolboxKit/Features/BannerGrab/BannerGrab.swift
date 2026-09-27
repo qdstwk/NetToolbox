@@ -53,11 +53,20 @@ final class BannerGrabViewModel {
         isRunning = true
         output = nil
         errorMessage = nil
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "banner-grab", target: target)
+        } catch {
+            errorMessage = error.localizedDescription
+            isRunning = false
+            return
+        }
         let result = await service.grab(host: target, port: port, probe: probe, tls: tls, timeout: 5)
         switch result {
         case .success(let text): output = text
         case .failure(let message): errorMessage = message.description
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
         isRunning = false
     }
 }
