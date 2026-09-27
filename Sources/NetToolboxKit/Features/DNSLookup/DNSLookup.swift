@@ -117,11 +117,6 @@ struct DNSLookupView: View {
         }
         .background(theme.background)
         .navigationTitle(Text(L10n("tool.dns.title")))
-        #if DEBUG
-        .task {
-            if let seed = ScreenshotSeed.input { viewModel.name = seed; await lookup() }
-        }
-        #endif
         .navigationBarTitleDisplayMode(.large)
     }
 
