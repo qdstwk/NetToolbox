@@ -19,19 +19,35 @@ enum UnifiedNetworkInterface {
 
     enum InterfaceError: LocalizedError, Sendable {
         case busy(operation: String, target: String)
+        case foregroundRequired
 
         var errorDescription: String? {
             switch self {
             case .busy(let operation, let target):
                 return "Another network operation is already active: \(operation) → \(target)"
+            case .foregroundRequired:
+                return "Network operations are allowed only while the app is active in the foreground"
             }
         }
     }
 
     private actor Admission {
         private var active: Lease?
+        private var foregroundActive = false
+        private var revocationGeneration: UInt64 = 0
+
+        func setForegroundActive(_ value: Bool) {
+            foregroundActive = value
+            if !value {
+                // Revoke admission immediately. Transport teardown is coordinated
+                // by lifecycle owners; clearing here guarantees no new I/O can start.
+                active = nil
+                revocationGeneration &+= 1
+            }
+        }
 
         func claim(operation: String, target: String) throws -> Lease {
+            guard foregroundActive else { throw InterfaceError.foregroundRequired }
             if let active {
                 throw InterfaceError.busy(operation: active.operation, target: active.target)
             }
@@ -63,6 +79,12 @@ enum UnifiedNetworkInterface {
 
     static func activeOperation() async -> Lease? {
         await admission.snapshot()
+    }
+
+    /// Called by the root scene lifecycle. Any non-active scene is fail closed:
+    /// no new network operation can be admitted.
+    static func setForegroundActive(_ active: Bool) async {
+        await admission.setForegroundActive(active)
     }
 
     private static func canonicalTarget(_ raw: String) -> String {
