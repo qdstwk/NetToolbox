@@ -23,7 +23,13 @@ struct UptimeService: Sendable {
         let clock = ContinuousClock()
         let start = clock.now
         do {
-            let (_, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+            let lease = try await UnifiedNetworkInterface.claim(operation: "uptime-check", target: parsed.host ?? text)
+            let session = URLSession(configuration: .ephemeral)
+            await UnifiedNetworkInterface.registerCancellation(for: lease) { session.invalidateAndCancel() }
+            let (_, response): (Data, URLResponse)
+            do { (_, response) = try await session.data(for: request) }
+            catch { await UnifiedNetworkInterface.release(lease); throw error }
+            await UnifiedNetworkInterface.release(lease)
             let elapsed = clock.now - start
             let ms = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1_000_000_000_000_000
             let status = (response as? HTTPURLResponse)?.statusCode
@@ -57,9 +63,8 @@ final class UptimeViewModel {
         rows = []
         var collected: [UptimeRow] = []
         let service = self.service
-        await withTaskGroup(of: UptimeRow.self) { group in
-            for url in urls { group.addTask { await service.check(url) } }
-            for await row in group { collected.append(row) }
+        for url in urls {
+            collected.append(await service.check(url))
         }
         let order = urls
         collected.sort { (order.firstIndex(of: $0.id) ?? 0) < (order.firstIndex(of: $1.id) ?? 0) }
