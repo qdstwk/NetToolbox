@@ -29,9 +29,8 @@ struct HTTPRequestService: HTTPRequesting {
             request.httpBody = Data(body.utf8)
         }
 
-        let session = URLSession(configuration: .ephemeral)
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await UnifiedNetworkInterface.httpData(for: request, operation: "http-request", target: normalized)
             guard let http = response as? HTTPURLResponse else { throw NetworkServiceError.decoding }
             let responseHeaders = http.allHeaderFields
                 .compactMap { key, value -> HTTPHeaderField? in
@@ -82,19 +81,11 @@ final class HTTPRequestViewModel {
     func send() async {
         guard !url.trimmingCharacters(in: .whitespaces).isEmpty else { output = .idle; return }
         output = .loading
-        let lease: UnifiedNetworkInterface.Lease
-        do {
-            lease = try await UnifiedNetworkInterface.claim(operation: "http-request", target: url)
-        } catch {
-            output = .failure(error.localizedDescription)
-            return
-        }
         do {
             output = .result(try await service.send(method: method, url: url, headers: parseHeaders(), body: body))
         } catch {
             output = .failure(error.localizedDescription)
         }
-        await UnifiedNetworkInterface.release(lease)
     }
 }
 
