@@ -45,10 +45,10 @@ final class CloudSync {
     func syncNow() async throws {
         guard isEnabled else { return }
         let lease = try await UnifiedNetworkInterface.claim(operation: "icloud-sync", target: "icloud-key-value-store")
-        defer { Task { await UnifiedNetworkInterface.release(lease) } }
         pushAllLocal()
         NSUbiquitousKeyValueStore.default.synchronize()
         pullLocal()
+        await UnifiedNetworkInterface.release(lease)
     }
 
     private func pushAllLocal() {
