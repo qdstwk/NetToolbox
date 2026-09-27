@@ -77,6 +77,12 @@ struct CloudflareSpeedEngine: Sendable {
                     continuation.yield(.latency(ms: ping, jitter: jitter))
 
                     continuation.yield(.phase(.download))
+                    let download = try await measureDownload { continuation.yield(.liveDownload($0)) }
+                    continuation.yield(.finalDownload(download))
+
+                    continuation.yield(.phase(.upload))
+                    let upload = try await measureUpload { continuation.yield(.liveUpload($0)) }
+                    continuation.yield(.finalUpload(upload))
 
                     continuation.yield(.phase(.finished))
                     continuation.finish()
