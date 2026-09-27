@@ -29,8 +29,11 @@ enum WorldPingError: LocalizedError {
 /// "World Ping": pings a target from probes distributed around the globe via
 /// the free, key-less **globalping.io** API (a measurement is started, then
 /// polled until it finishes). No local ICMP — the probes do the pinging.
-struct WorldPingService: Sendable {
+final class WorldPingService: @unchecked Sendable {
+    private let session = URLSession(configuration: .ephemeral)
     private let base = "https://api.globalping.io/v1/measurements"
+
+    func cancel() { session.invalidateAndCancel() }
 
     /// Starts a measurement and returns its id.
     func start(target: String, limit: Int, packets: Int) async throws -> String {
@@ -47,7 +50,7 @@ struct WorldPingService: Sendable {
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw WorldPingError.network
         }
@@ -59,7 +62,7 @@ struct WorldPingService: Sendable {
     /// Fetches the current results; `finished` is true once the run completes.
     func poll(id: String) async throws -> (finished: Bool, probes: [WorldPingProbe]) {
         guard let url = URL(string: "\(base)/\(id)") else { throw WorldPingError.network }
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await session.data(from: url)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw WorldPingError.network }
 
         struct Resp: Decodable {
@@ -126,6 +129,7 @@ final class WorldPingViewModel {
             isRunning = false
             return
         }
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { [service] in service.cancel() }
         do {
             let id = try await service.start(target: target, limit: limit, packets: packets)
             for _ in 0..<25 {
