@@ -205,6 +205,9 @@ final class LANScannerViewModel {
     private func runScan() async {
         // 1. Sweep the device's own /24 (or whatever the interface reports).
         let cidr = LocalNetworkInfo.primaryIPv4CIDR() ?? "192.168.1.0/24"
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "lan-scan", target: cidr) }
+        catch { isScanning = false; return }
         let hosts = (try? IPRangeScanner.hosts(cidr: cidr)) ?? []
         let swept = await Self.sweep(hosts)
         if Task.isCancelled { return }
@@ -223,6 +226,7 @@ final class LANScannerViewModel {
         devices = LANMerge.devices(swept: swept, bonjour: bonjour, reverseDNS: reverse)
         showPermissionHint = devices.isEmpty
         stopBrowsers()
+        await UnifiedNetworkInterface.release(lease)
         history.insert("\(devices.count) devices", at: 0)
         if history.count > 10 { history.removeLast() }
         isScanning = false
@@ -268,21 +272,13 @@ final class LANScannerViewModel {
     /// ICMP + TCP-connect sweep of the given hosts, concurrency-limited.
     private nonisolated static func sweep(_ hosts: [String]) async -> [HostResult] {
         var results: [HostResult] = []
-        await withTaskGroup(of: HostResult?.self) { group in
-            let limiter = ConcurrencyLimiter(limit: 24)
-            for ip in hosts {
-                group.addTask {
-                    if Task.isCancelled { return nil }
-                    await limiter.acquire()
-                    defer { Task { await limiter.release() } }
-                    async let icmp = ICMPHostPinger.probe(ip: ip, timeout: 0.9)
-                    async let tcp = TCPHostProbe.probe(ip: ip, timeout: 0.9)
-                    let (viaICMP, viaTCP) = await (icmp, tcp)
-                    if let rtt = viaICMP ?? viaTCP { return HostResult(ip: ip, rttMs: rtt) }
-                    return nil
-                }
+        for ip in hosts {
+            if Task.isCancelled { break }
+            var rtt = await ICMPHostPinger.probe(ip: ip, timeout: 0.9)
+            if rtt == nil {
+                rtt = await TCPHostProbe.probe(ip: ip, timeout: 0.9)
             }
-            for await result in group { if let result { results.append(result) } }
+            if let rtt { results.append(HostResult(ip: ip, rttMs: rtt)) }
         }
         return results
     }
@@ -300,11 +296,11 @@ final class LANScannerViewModel {
     }
 
     private nonisolated static func reverseDNS(_ ips: [String]) async -> [String: String] {
-        let unique = Array(Set(ips))
+        let unique = Array(Set(ips)).sorted()
         var map: [String: String] = [:]
-        await withTaskGroup(of: (String, String?).self) { group in
-            for ip in unique { group.addTask { (ip, LANDNS.reverseName(ip: ip)) } }
-            for await (ip, name) in group { if let name { map[ip] = name } }
+        for ip in unique {
+            if Task.isCancelled { break }
+            if let name = LANDNS.reverseName(ip: ip) { map[ip] = name }
         }
         return map
     }
