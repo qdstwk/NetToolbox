@@ -137,6 +137,8 @@ final class TCPConnection: @unchecked Sendable {
         }
         let parameters: NWParameters = tls ? .tls : .tcp
         connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
+        let connection = self.connection
+        UnifiedNetworkInterface.registerTransportCancellation { connection.cancel() }
     }
 
     /// Opens the connection, resolving when it becomes ready.
