@@ -15,12 +15,19 @@ final class WakeOnLANViewModel {
     var portText = "9"
     private(set) var output: Output = .idle
 
-    func send() {
+    func send() async {
         let macText = mac.trimmingCharacters(in: .whitespaces)
         guard !macText.isEmpty else { output = .idle; return }
         let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) ?? 9
         let broadcastAddress = broadcast.trimmingCharacters(in: .whitespaces)
 
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "wake-on-lan", target: broadcastAddress)
+        } catch {
+            output = .failure(error.localizedDescription)
+            return
+        }
         let result = WakeOnLAN.send(macText: macText, broadcast: broadcastAddress, port: port)
         switch result {
         case .success:
@@ -28,6 +35,7 @@ final class WakeOnLANViewModel {
         case .failure(let error):
             output = .failure(error.localizedDescription)
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
     }
 }
 
@@ -102,7 +110,7 @@ struct WakeOnLANView: View {
             }
 
             Button {
-                viewModel.send()
+                Task { await viewModel.send() }
             } label: {
                 Label(L10nString("wol.action.wake"), systemImage: "power")
                     .font(AppTypography.headline)
