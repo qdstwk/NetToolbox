@@ -195,6 +195,15 @@ struct CameraEditorSheet: View {
             password: draft.password
         )
         Task { @MainActor in
+            let target = draft.host.trimmingCharacters(in: .whitespaces)
+            let lease: UnifiedNetworkInterface.Lease
+            do {
+                lease = try await UnifiedNetworkInterface.claim(operation: "camera-onvif-discovery", target: target)
+            } catch {
+                probeError = error.localizedDescription
+                isProbing = false
+                return
+            }
             do {
                 let result = try await client.discover()
                 discovery = result
@@ -206,6 +215,7 @@ struct CameraEditorSheet: View {
             } catch {
                 probeError = error.localizedDescription
             }
+            await UnifiedNetworkInterface.release(lease)
             isProbing = false
         }
     }
