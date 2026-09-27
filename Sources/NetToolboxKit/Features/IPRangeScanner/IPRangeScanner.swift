@@ -132,6 +132,7 @@ final class IPRangeScannerViewModel {
     private(set) var history: [String] = []
     var activity: ActivityCenter?
     var toolID = ""
+    private var currentCancellation: NetworkCancellationHandle?
 
     func scan() async {
         errorMessage = nil
@@ -153,6 +154,7 @@ final class IPRangeScannerViewModel {
         catch { errorMessage = error.localizedDescription; isScanning = false; return }
 
         let cancellation = NetworkCancellationHandle()
+        currentCancellation = cancellation
         await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
 
         // Strict single-line policy: one host, one probe method, at a time.
@@ -168,13 +170,14 @@ final class IPRangeScannerViewModel {
                 results.sort { Self.value($0.ip) < Self.value($1.ip) }
             }
         }
+        currentCancellation = nil
         await UnifiedNetworkInterface.release(lease)
         isScanning = false
         history.insert("\(cidr) — \(results.count) up / \(total)", at: 0)
         if history.count > 10 { history.removeLast() }
     }
 
-    func stop() { isScanning = false }
+    func stop() { currentCancellation?.cancel(); isScanning = false }
 
     private static func value(_ ip: String) -> UInt32 {
         (try? SubnetEngine.parseIPv4(ip)) ?? 0
