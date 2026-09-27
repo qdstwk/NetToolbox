@@ -19,9 +19,9 @@ final class ASNInfoViewModel {
         isLoading = true
         errorMessage = nil
         result = nil
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "bgp-asn", target: value)
+            lease = try await UnifiedNetworkInterface.claim(operation: "bgp-asn", target: value)
         } catch {
             errorMessage = error.localizedDescription
             isLoading = false
@@ -32,7 +32,7 @@ final class ASNInfoViewModel {
         } catch {
             errorMessage = error.localizedDescription
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
         isLoading = false
     }
 }
@@ -141,9 +141,9 @@ final class IPBGPViewModel {
         isLoading = true
         errorMessage = nil
         result = nil
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "bgp-ip", target: value)
+            lease = try await UnifiedNetworkInterface.claim(operation: "bgp-ip", target: value)
         } catch {
             errorMessage = error.localizedDescription
             isLoading = false
@@ -154,7 +154,7 @@ final class IPBGPViewModel {
         } catch {
             errorMessage = error.localizedDescription
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
         isLoading = false
     }
 }
