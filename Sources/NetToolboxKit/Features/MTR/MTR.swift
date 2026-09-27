@@ -102,16 +102,16 @@ final class MTRViewModel {
         for ttl in 1...maxHops { stats[ttl] = MTRHop(ttl: ttl) }
         var lastHop = maxHops
         isRunning = true
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "mtr", target: target) }
+        catch { errorMessage = error.localizedDescription; isRunning = false; return }
 
         while isRunning {
             rounds += 1
-            let results = await withTaskGroup(of: (Int, TracerouteHop).self) { group in
-                for ttl in 1...lastHop {
-                    group.addTask { (ttl, await prober.probe(host: target, ttl: ttl, timeout: timeout)) }
-                }
-                var out: [(Int, TracerouteHop)] = []
-                for await result in group { out.append(result) }
-                return out
+            var results: [(Int, TracerouteHop)] = []
+            for ttl in 1...lastHop {
+                guard isRunning else { break }
+                results.append((ttl, await prober.probe(host: target, ttl: ttl, timeout: timeout)))
             }
             guard isRunning else { break }
 
@@ -130,6 +130,7 @@ final class MTRViewModel {
 
             try? await Task.sleep(for: .seconds(1))
         }
+        await UnifiedNetworkInterface.release(lease)
         isRunning = false
     }
 
