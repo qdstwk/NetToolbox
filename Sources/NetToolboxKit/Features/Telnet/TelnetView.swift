@@ -49,6 +49,7 @@ final class TelnetViewModel {
             statusMessage = String(localized: "error.probe.invalidHost", bundle: .module)
             return
         }
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { connection.cancel() }
         let result = await connection.open(timeout: 8)
         switch result {
         case .success:
