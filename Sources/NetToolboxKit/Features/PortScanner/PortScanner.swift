@@ -135,9 +135,9 @@ final class PortScannerViewModel {
         scannedCount = 0
         totalCount = targetPorts.count
 
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "port-scan", target: target)
+            lease = try await UnifiedNetworkInterface.claim(operation: "port-scan", target: target)
         } catch {
             errorMessage = error.localizedDescription
             isScanning = false
@@ -155,7 +155,7 @@ final class PortScannerViewModel {
                 ))
             }
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
         isScanning = false
         history.insert("\(target) — \(results.count) open / \(totalCount)", at: 0)
         if history.count > 10 { history.removeLast() }
