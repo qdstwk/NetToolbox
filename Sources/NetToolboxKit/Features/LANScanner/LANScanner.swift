@@ -182,7 +182,6 @@ final class LANScannerViewModel {
         bonjourRaw = []
         showPermissionHint = false
         isScanning = true
-        startBonjour()
         scanTask = Task { await runScan() }
     }
 
@@ -210,20 +209,22 @@ final class LANScannerViewModel {
         catch { isScanning = false; return }
         let hosts = (try? IPRangeScanner.hosts(cidr: cidr)) ?? []
         let swept = await Self.sweep(hosts)
-        if Task.isCancelled { return }
+        if Task.isCancelled {
+            await UnifiedNetworkInterface.release(lease)
+            return
+        }
 
-        // 2. Give Bonjour a moment to finish resolving what it found in parallel.
-        try? await Task.sleep(for: .seconds(2))
-        if Task.isCancelled { return }
-
-        // 3. Resolve Bonjour services to IPs and reverse-DNS every address.
-        let bonjour = await Self.resolveBonjour(bonjourRaw)
-        let addresses = swept.map(\.ip) + bonjour.map(\.ip)
+        // 2. Strict single-line mode: no parallel Bonjour browsers.
+        // Reverse DNS is also performed one address at a time.
+        let addresses = swept.map(\.ip)
         let reverse = await Self.reverseDNS(addresses)
-        if Task.isCancelled { return }
+        if Task.isCancelled {
+            await UnifiedNetworkInterface.release(lease)
+            return
+        }
 
         // 4. Merge and publish.
-        devices = LANMerge.devices(swept: swept, bonjour: bonjour, reverseDNS: reverse)
+        devices = LANMerge.devices(swept: swept, bonjour: [], reverseDNS: reverse)
         showPermissionHint = devices.isEmpty
         stopBrowsers()
         await UnifiedNetworkInterface.release(lease)
