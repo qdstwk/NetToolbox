@@ -28,19 +28,15 @@ enum TCPTraceProbe {
         return nil
     }
 
-    /// Probes every TTL concurrently; the smallest TTL that reaches the host is
-    /// its hop distance (all larger TTLs reach it too).
+    /// Probes TTLs strictly one at a time; first reach is the hop distance.
     private static func distance(host: String, port: UInt16, maxHops: Int, timeout: Double) async -> Result? {
-        let hits = await withTaskGroup(of: (Int, Double)?.self) { group in
-            for ttl in 1...maxHops {
-                group.addTask { await reach(host: host, port: port, ttl: ttl, timeout: timeout) }
+        for ttl in 1...maxHops {
+            if Task.isCancelled { return nil }
+            if let hit = await reach(host: host, port: port, ttl: ttl, timeout: timeout) {
+                return Result(hops: hit.0, rttMs: hit.1, port: port)
             }
-            var results: [(Int, Double)] = []
-            for await hit in group { if let hit { results.append(hit) } }
-            return results
         }
-        guard let best = hits.min(by: { $0.0 < $1.0 }) else { return nil }
-        return Result(hops: best.0, rttMs: best.1, port: port)
+        return nil
     }
 
     private static func reach(host: String, port: UInt16, ttl: Int, timeout: Double) async -> (Int, Double)? {
