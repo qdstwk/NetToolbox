@@ -18,7 +18,7 @@ struct TracerouteHop: Identifiable, Equatable, Sendable {
 
 /// Probes a single TTL and reports the responding hop.
 protocol TracerouteProbing: Sendable {
-    func probe(host: String, ttl: Int, timeout: Double) async -> TracerouteHop
+    func probe(host: String, ttl: Int, timeout: Double, cancellation: NetworkCancellationHandle) async -> TracerouteHop
 }
 
 /// Traceroute over an unprivileged `SOCK_DGRAM`/`IPPROTO_ICMP` socket — the
@@ -30,13 +30,13 @@ struct ICMPTraceroute: TracerouteProbing {
         await withCheckedContinuation { continuation in
             let shot = OneShot(continuation)
             DispatchQueue.global(qos: .userInitiated).async {
-                shot.resume(Self.blockingProbe(host: host, ttl: ttl, timeout: timeout))
+                shot.resume(Self.blockingProbe(host: host, ttl: ttl, timeout: timeout, cancellation: cancellation))
             }
         }
     }
 
     #if canImport(Darwin)
-    private static func blockingProbe(host: String, ttl: Int, timeout: Double) -> TracerouteHop {
+    private static func blockingProbe(host: String, ttl: Int, timeout: Double, cancellation: NetworkCancellationHandle) -> TracerouteHop {
         func fail() -> TracerouteHop {
             TracerouteHop(ttl: ttl, address: nil, rttMs: nil, reached: false)
         }
@@ -58,9 +58,11 @@ struct ICMPTraceroute: TracerouteProbing {
         memcpy(&target, addr, Int(MemoryLayout<sockaddr_in>.size))
         freeaddrinfo(infoPointer)
 
+        if cancellation.isCancelled { return fail() }
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
         guard fd >= 0 else { return fail() }
-        defer { close(fd) }
+        let owner = TracerouteSocketOwner(fd)
+        defer { owner.closeIfOpen(); cancellation.clear() }
 
         var ttlValue = Int32(ttl)
         _ = setsockopt(fd, IPPROTO_IP, IP_TTL, &ttlValue, socklen_t(MemoryLayout<Int32>.size))
@@ -80,6 +82,8 @@ struct ICMPTraceroute: TracerouteProbing {
             }
         }
         guard sent > 0 else { return fail() }
+        cancellation.install { owner.cancel() }
+        if cancellation.isCancelled { return fail() }
 
         var responseBuffer = [UInt8](repeating: 0, count: 512)
         var source = sockaddr_in()
@@ -113,8 +117,18 @@ struct ICMPTraceroute: TracerouteProbing {
         let reached = type == ICMP.echoReplyType
         return TracerouteHop(ttl: ttl, address: address, rttMs: ms, reached: reached)
     }
+    private final class TracerouteSocketOwner: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fd: Int32?
+        init(_ fd: Int32) { self.fd = fd }
+        func cancel() {
+            lock.lock(); let value = fd; fd = nil; lock.unlock()
+            if let value { close(value) }
+        }
+        func closeIfOpen() { cancel() }
+    }
     #else
-    private static func blockingProbe(host: String, ttl: Int, timeout: Double) -> TracerouteHop {
+    private static func blockingProbe(host: String, ttl: Int, timeout: Double, cancellation: NetworkCancellationHandle) -> TracerouteHop {
         TracerouteHop(ttl: ttl, address: nil, rttMs: nil, reached: false)
     }
     #endif
@@ -143,6 +157,7 @@ final class TracerouteViewModel {
     var toolID = ""
 
     private let prober: any TracerouteProbing
+    private var currentCancellation: NetworkCancellationHandle?
 
     init(prober: any TracerouteProbing = ICMPTraceroute()) {
         self.prober = prober
@@ -170,13 +185,17 @@ final class TracerouteViewModel {
             return
         }
 
+        let cancellation = NetworkCancellationHandle()
+        currentCancellation = cancellation
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
+
         // Security invariant: exactly one probe is on the wire at a time.
         var collected: [Int: TracerouteHop] = [:]
         for ttl in 1...maxHops {
             guard isRunning else { break }
             var hop = TracerouteHop(ttl: ttl, address: nil, rttMs: nil, reached: false)
             for _ in 0..<retries {
-                hop = await prober.probe(host: target, ttl: ttl, timeout: timeout)
+                hop = await prober.probe(host: target, ttl: ttl, timeout: timeout, cancellation: cancellation)
                 if hop.address != nil { break }
             }
             collected[ttl] = hop
@@ -195,12 +214,13 @@ final class TracerouteViewModel {
         // `*` and no summary at all — which read as "traceroute doesn't work".)
         let namedRouter = hops.contains { $0.address != nil && !$0.reached }
         if isRunning, !namedRouter {
-            tcpSummary = await TCPTraceProbe.trace(host: target, maxHops: maxHops, timeout: timeout)
+            tcpSummary = await TCPTraceProbe.trace(host: target, maxHops: maxHops, timeout: timeout, cancellation: cancellation)
             if tcpSummary == nil, !reached {
                 errorMessage = L10nString("traceroute.error.noResponse")
             }
         }
 
+        currentCancellation = nil
         await UnifiedNetworkInterface.release(lease)
         isRunning = false
         history.insert("\(target) — \(hops.count) hops\(reached ? " ✓" : "")", at: 0)
@@ -218,7 +238,10 @@ final class TracerouteViewModel {
         }
     }
 
-    func stop() { isRunning = false }
+    func stop() {
+        currentCancellation?.cancel()
+        isRunning = false
+    }
 }
 
 struct TracerouteTool: NetworkTool {
