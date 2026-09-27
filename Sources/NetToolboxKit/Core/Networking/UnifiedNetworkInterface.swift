@@ -1,15 +1,5 @@
 import Foundation
 
-/// The only app-level admission point for active network work.
-///
-/// Security invariants:
-/// - At most one network operation exists in the whole app.
-/// - A second operation is rejected immediately; nothing is queued.
-/// - A lease is bound to one operation + one target.
-/// - Only the exact lease owner can release the slot.
-///
-/// Transport implementations (TCP/UDP/HTTP/TLS) remain protocol-specific,
-/// but Features must enter the network through this interface first.
 final class NetworkCancellationHandle: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
@@ -49,6 +39,14 @@ final class NetworkCancellationHandle: @unchecked Sendable {
     }
 }
 
+/// Sole app-level admission point for network work.
+///
+/// Invariants:
+/// - foreground only; scene revocation is synchronous at the root callback;
+/// - at most one top-level operation/target;
+/// - no queue: a second operation fails closed;
+/// - a stale lease can never release a newer operation;
+/// - the active transport exposes a synchronous, idempotent cancellation hook.
 enum UnifiedNetworkInterface {
     struct Lease: Sendable, Equatable {
         fileprivate let id: UUID
@@ -56,8 +54,6 @@ enum UnifiedNetworkInterface {
         let target: String
     }
 
-    /// Synchronous, idempotent teardown hook owned by the active transport.
-    /// It must never start network work; it may only cancel/close.
     struct Cancellation: @unchecked Sendable {
         let cancel: @Sendable () -> Void
     }
@@ -74,8 +70,61 @@ enum UnifiedNetworkInterface {
             case .foregroundRequired:
                 return "Network operations are allowed only while the app is active in the foreground"
             case .operationTimedOut(let seconds):
-                return "Network operation exceeded its (seconds)-second deadline"
+                return "Network operation exceeded its \(seconds)-second deadline"
             }
+        }
+    }
+
+    private final class ForegroundState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var active = false
+        private var generation: UInt64 = 0
+
+        func set(_ value: Bool, generation newGeneration: UInt64) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard newGeneration >= generation else { return false }
+            generation = newGeneration
+            active = value
+            return true
+        }
+
+        var isActive: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return active
+        }
+    }
+
+    private final class CancellationBridge: @unchecked Sendable {
+        private let lock = NSLock()
+        private var foreground = false
+        private var current: (UUID, Cancellation)?
+
+        func setForeground(_ value: Bool) {
+            lock.lock()
+            foreground = value
+            let hook = value ? nil : current?.1
+            if !value { current = nil }
+            lock.unlock()
+            hook?.cancel()
+        }
+
+        func install(_ hook: Cancellation, leaseID: UUID) {
+            lock.lock()
+            guard foreground else {
+                lock.unlock()
+                hook.cancel()
+                return
+            }
+            current = (leaseID, hook)
+            lock.unlock()
+        }
+
+        func clear(leaseID: UUID) {
+            lock.lock()
+            if current?.0 == leaseID { current = nil }
+            lock.unlock()
         }
     }
 
@@ -84,23 +133,21 @@ enum UnifiedNetworkInterface {
         private var cancellation: (leaseID: UUID, hook: Cancellation)?
         private var foregroundActive = false
         private var lifecycleGeneration: UInt64 = 0
-        private var revocationGeneration: UInt64 = 0
 
-        func setForegroundActive(_ value: Bool) {
+        func setForegroundActive(_ value: Bool, generation: UInt64) {
+            guard generation >= lifecycleGeneration else { return }
+            lifecycleGeneration = generation
             foregroundActive = value
             if !value {
-                // Revoke admission first, then synchronously tear down the one
-                // permitted active transport. No background grace period.
-                let hook = cancellation?.hook
                 cancellation = nil
                 active = nil
-                revocationGeneration &+= 1
-                hook?.cancel()
             }
         }
 
         func claim(operation: String, target: String) throws -> Lease {
-            guard foregroundActive else { throw InterfaceError.foregroundRequired }
+            guard foregroundActive, foregroundState.isActive else {
+                throw InterfaceError.foregroundRequired
+            }
             if let active {
                 throw InterfaceError.busy(operation: active.operation, target: active.target)
             }
@@ -109,12 +156,13 @@ enum UnifiedNetworkInterface {
             return lease
         }
 
-        func registerCancellation(_ hook: Cancellation, for lease: Lease) {
-            guard foregroundActive, active?.id == lease.id else {
+        func registerCancellation(_ hook: Cancellation, for lease: Lease) -> Bool {
+            guard foregroundActive, foregroundState.isActive, active?.id == lease.id else {
                 hook.cancel()
-                return
+                return false
             }
             cancellation = (lease.id, hook)
+            return true
         }
 
         func release(_ lease: Lease) {
@@ -126,10 +174,10 @@ enum UnifiedNetworkInterface {
         func snapshot() -> Lease? { active }
     }
 
+    private static let foregroundState = ForegroundState()
+    private static let cancellationBridge = CancellationBridge()
     private static let admission = Admission()
 
-    /// Hard ceilings for a single foreground operation. These are total
-    /// operation deadlines, not per-packet/per-read timeouts.
     enum Deadline {
         static let quick: Duration = .seconds(15)
         static let standard: Duration = .seconds(30)
@@ -139,21 +187,35 @@ enum UnifiedNetworkInterface {
     }
 
     static func claim(operation: String, target: String) async throws -> Lease {
-        try await admission.claim(
-            operation: operation,
-            target: canonicalTarget(target)
-        )
+        guard foregroundState.isActive else { throw InterfaceError.foregroundRequired }
+        return try await admission.claim(operation: operation, target: canonicalTarget(target))
     }
 
     static func registerCancellation(
         for lease: Lease,
         _ cancel: @escaping @Sendable () -> Void
     ) async {
-        await admission.registerCancellation(Cancellation(cancel: cancel), for: lease)
+        let hook = Cancellation(cancel: cancel)
+        let accepted = await admission.registerCancellation(hook, for: lease)
+        if accepted { cancellationBridge.install(hook, leaseID: lease.id) }
     }
 
     static func release(_ lease: Lease) async {
+        cancellationBridge.clear(leaseID: lease.id)
         await admission.release(lease)
+    }
+
+    /// Called synchronously from the scene-phase callback before any Task hop.
+    /// A non-active scene closes the currently registered transport immediately
+    /// and blocks new claims immediately.
+    static func setForegroundActiveImmediately(_ active: Bool, generation: UInt64) {
+        guard foregroundState.set(active, generation: generation) else { return }
+        cancellationBridge.setForeground(active)
+    }
+
+    static func setForegroundActive(_ active: Bool, generation: UInt64) async {
+        setForegroundActiveImmediately(active, generation: generation)
+        await admission.setForegroundActive(active, generation: generation)
     }
 
     static func withDeadline<T: Sendable>(
@@ -166,9 +228,7 @@ enum UnifiedNetworkInterface {
                 try await Task.sleep(for: duration)
                 throw InterfaceError.operationTimedOut(seconds: duration.secondsDouble)
             }
-            guard let result = try await group.next() else {
-                throw CancellationError()
-            }
+            guard let result = try await group.next() else { throw CancellationError() }
             group.cancelAll()
             return result
         }
@@ -209,17 +269,10 @@ enum UnifiedNetworkInterface {
         await admission.snapshot()
     }
 
-    /// Called by the root scene lifecycle. Any non-active scene is fail closed:
-    /// no new network operation can be admitted.
-    static func setForegroundActive(_ active: Bool, generation: UInt64) async {
-        await admission.setForegroundActive(active, generation: generation)
-    }
-
     private static func canonicalTarget(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }
-
 
 private extension Duration {
     var secondsDouble: Double {
