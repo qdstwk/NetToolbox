@@ -30,11 +30,14 @@ final class EmailSecurityViewModel {
         errorMessage = nil
         records = []
         let resolver = DoHResolver()
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "email-security", target: name) }
+        catch { errorMessage = error.localizedDescription; isRunning = false; return }
 
         do {
-            let spf = try await txt(resolver, name, contains: "v=spf1")
-            let dmarc = try await txt(resolver, "_dmarc.\(name)", contains: "v=dmarc1")
-            let dkim = try await txt(resolver, "\(dkimSelector)._domainkey.\(name)", contains: "p=")
+            let spf = try await txt(resolver, name, lease: lease, contains: "v=spf1")
+            let dmarc = try await txt(resolver, "_dmarc.\(name)", lease: lease, contains: "v=dmarc1")
+            let dkim = try await txt(resolver, "\(dkimSelector)._domainkey.\(name)", lease: lease, contains: "p=")
 
             records = [
                 EmailSecurityRecord(
@@ -56,12 +59,13 @@ final class EmailSecurityViewModel {
         } catch {
             errorMessage = error.localizedDescription
         }
+        await UnifiedNetworkInterface.release(lease)
         isRunning = false
     }
 
     /// Returns the first TXT value (loosely) matching `needle`, else nil.
-    private func txt(_ resolver: DoHResolver, _ name: String, contains needle: String) async throws -> String? {
-        let records = try await resolver.resolve(name: name, type: .txt, server: "cloudflare-dns.com")
+    private func txt(_ resolver: DoHResolver, _ name: String, lease: UnifiedNetworkInterface.Lease, contains needle: String) async throws -> String? {
+        let records = try await resolver.resolve(name: name, type: .txt, server: "cloudflare-dns.com", lease: lease)
         return records
             .map { $0.value.replacingOccurrences(of: "\"", with: "") }
             .first { $0.lowercased().contains(needle) }
@@ -106,11 +110,6 @@ struct EmailSecurityView: View {
         .background(theme.background)
         .navigationTitle(Text(L10n("tool.emailsec.title")))
         .navigationBarTitleDisplayMode(.large)
-        #if DEBUG
-        .task {
-            if let seed = ScreenshotSeed.input { viewModel.domain = seed; await viewModel.run() }
-        }
-        #endif
     }
 
     private var inputSection: some View {
