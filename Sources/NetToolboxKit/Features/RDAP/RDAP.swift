@@ -22,7 +22,14 @@ struct RDAPService: Sendable {
         request.timeoutInterval = 15
         request.setValue("application/rdap+json", forHTTPHeaderField: "Accept")
 
-        let (data, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+        let lease = try await UnifiedNetworkInterface.claim(operation: "rdap", target: trimmed)
+        let session = URLSession(configuration: .ephemeral)
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { session.invalidateAndCancel() }
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch { await UnifiedNetworkInterface.release(lease); throw error }
+        await UnifiedNetworkInterface.release(lease)
         if let http = response as? HTTPURLResponse, http.statusCode == 404 {
             throw NetworkServiceError.badStatus(404)
         }
