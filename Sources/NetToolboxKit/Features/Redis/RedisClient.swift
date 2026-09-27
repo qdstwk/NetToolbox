@@ -74,7 +74,7 @@ struct RedisService: Sendable {
         }
         if !password.isEmpty {
             _ = await connection.send(RESP.encode(command: "AUTH \(password)"))
-            _ = await connection.receive()
+            _ = await connection.receive(timeout: 6)
         }
         _ = await connection.send(RESP.encode(command: command))
         let result = await connection.receiveAll(timeout: 3)
