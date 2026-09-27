@@ -584,6 +584,7 @@ struct IntegratedSSHGCMCipher {
 
 // [ANNOTATION] 按 OpenSSH AES-GCM 约定推进 64 位 invocation counter；禁止溢出回绕以避免 nonce 重用。
     private func currentNonce() throws -> Data {
+        guard !exhausted else { throw SSHError.encryptFailed }
         // counter == UInt64.max 仍是一个尚未使用的合法 nonce；成功使用后才进入耗尽状态。
         var nonce = Data(fixed)
         var value = counter
