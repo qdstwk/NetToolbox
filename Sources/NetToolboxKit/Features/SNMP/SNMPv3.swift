@@ -307,7 +307,7 @@ struct SNMPv3Service: Sendable {
     ) async throws -> SNMPVarbind {
         // 1. Engine discovery.
         let discovery = try SNMPv3Message.encodeDiscovery(msgID: 1)
-        let discoveryResponse = await UDPExchange.request(host: host, port: port, payload: discovery, timeout: 5)
+        let discoveryResponse = await UDPExchange.request(host: host, port: port, payload: discovery, timeout: 5, cancellation: cancellation)
         guard case .success(let discoveryData) = discoveryResponse else {
             if case .failure(let error) = discoveryResponse { throw error }
             throw SNMPError.malformedResponse
@@ -320,7 +320,7 @@ struct SNMPv3Service: Sendable {
         let request = try SNMPv3Message.encodeAuthGet(
             msgID: 2, oid: oid, user: user, engine: engine, authKey: key, auth: auth
         )
-        let response = await UDPExchange.request(host: host, port: port, payload: request, timeout: 5)
+        let response = await UDPExchange.request(host: host, port: port, payload: request, timeout: 5, cancellation: cancellation)
         guard case .success(let data) = response else {
             if case .failure(let error) = response { throw error }
             throw SNMPError.malformedResponse
