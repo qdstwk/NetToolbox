@@ -131,6 +131,14 @@ final class TFTPViewModel {
         preview = ""
         byteCount = 0
 
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "tftp", target: target)
+        } catch {
+            errorMessage = error.localizedDescription
+            isRunning = false
+            return
+        }
         let result = await client.download(host: target, port: port, filename: name, maxBytes: 2_000_000)
         switch result {
         case .success(let data):
@@ -145,6 +153,7 @@ final class TFTPViewModel {
         case .failure(let message):
             errorMessage = message.description
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
         isRunning = false
     }
 }
