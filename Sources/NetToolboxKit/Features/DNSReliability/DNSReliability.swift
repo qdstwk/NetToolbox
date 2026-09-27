@@ -141,9 +141,9 @@ final class DNSReliabilityViewModel {
         probes = []
         summary = DNSReliabilitySummary()
         isRunning = true
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "dns-reliability", target: server)
+            lease = try await UnifiedNetworkInterface.claim(operation: "dns-reliability", target: server)
         } catch {
             errorMessage = error.localizedDescription
             isRunning = false
@@ -169,7 +169,7 @@ final class DNSReliabilityViewModel {
             guard isRunning else { break }
             try? await Task.sleep(for: .seconds(interval))
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
     }
 
     func stop() { isRunning = false }
