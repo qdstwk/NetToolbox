@@ -44,6 +44,7 @@ enum UnifiedNetworkInterface {
         private var active: Lease?
         private var cancellation: (leaseID: UUID, hook: Cancellation)?
         private var foregroundActive = false
+        private var lifecycleGeneration: UInt64 = 0
         private var revocationGeneration: UInt64 = 0
 
         func setForegroundActive(_ value: Bool) {
@@ -171,8 +172,8 @@ enum UnifiedNetworkInterface {
 
     /// Called by the root scene lifecycle. Any non-active scene is fail closed:
     /// no new network operation can be admitted.
-    static func setForegroundActive(_ active: Bool) async {
-        await admission.setForegroundActive(active)
+    static func setForegroundActive(_ active: Bool, generation: UInt64) async {
+        await admission.setForegroundActive(active, generation: generation)
     }
 
     private static func canonicalTarget(_ raw: String) -> String {
