@@ -139,19 +139,9 @@ final class MTRViewModel {
     // MARK: - ASN enrichment
 
     private func requestMissingASNs() {
-        guard lookupASN else { return }
-        for hop in hops {
-            guard let address = hop.address,
-                  asnByAddress[address] == nil,
-                  let query = MTREngine.cymruQuery(for: address) else { continue }
-            asnByAddress[address] = ""   // mark in-flight so we ask once
-            let resolver = self.resolver
-            Task { [weak self] in
-                let records = try? await resolver.resolve(name: query, type: .txt, server: "1.1.1.1")
-                let asn = records?.first.map(\.value).flatMap(MTREngine.parseASN) ?? "—"
-                self?.applyASN(asn, to: address)
-            }
-        }
+        // Disabled under strict single-line mode. Background ASN enrichment
+        // would create an independent DNS operation while MTR owns the network.
+        // ASN lookup can be made an explicit foreground action later.
     }
 
     private func applyASN(_ asn: String, to address: String) {
