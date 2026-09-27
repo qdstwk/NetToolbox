@@ -19,11 +19,20 @@ final class ASNInfoViewModel {
         isLoading = true
         errorMessage = nil
         result = nil
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "bgp-asn", target: value)
+        } catch {
+            errorMessage = error.localizedDescription
+            isLoading = false
+            return
+        }
         do {
             result = try await service.lookupASN(value)
         } catch {
             errorMessage = error.localizedDescription
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
         isLoading = false
     }
 }
@@ -132,11 +141,20 @@ final class IPBGPViewModel {
         isLoading = true
         errorMessage = nil
         result = nil
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "bgp-ip", target: value)
+        } catch {
+            errorMessage = error.localizedDescription
+            isLoading = false
+            return
+        }
         do {
             result = try await service.lookupIP(value)
         } catch {
             errorMessage = error.localizedDescription
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
         isLoading = false
     }
 }
