@@ -67,15 +67,15 @@ final class PingViewModel {
         }
         resolvedIP = resolved.ip
 
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "ping", target: resolved.ip)
+            lease = try await UnifiedNetworkInterface.claim(operation: "ping", target: resolved.ip)
         } catch {
             errorMessage = error.localizedDescription
             isRunning = false
             return
         }
-        defer { Task { await GlobalNetworkOperationGate.shared.release(lease) } }
+        defer { Task { await UnifiedNetworkInterface.release(lease) } }
 
         let tcpPinger = TCPPingService()
         var useICMP = true
