@@ -47,6 +47,7 @@ final class SpeedTestViewModel {
             activity?.stop(toolID)
             return
         }
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { [engine] in engine.cancelNetwork() }
         do {
             for try await update in engine.stream() {
                 apply(update)
