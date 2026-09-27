@@ -140,34 +140,24 @@ final class IPRangeScannerViewModel {
         total = hosts.count
         isScanning = true
 
-        await withTaskGroup(of: HostResult?.self) { group in
-            let limiter = ConcurrencyLimiter(limit: 24)
-            for ip in hosts {
-                group.addTask {
-                    await limiter.acquire()
-                    defer { Task { await limiter.release() } }
-                    // Race ICMP against a TCP-connect probe: ICMP gives a true
-                    // round-trip when it's allowed, and the TCP probe still
-                    // finds hosts on networks (and in the Playgrounds sandbox)
-                    // that filter ICMP entirely.
-                    async let icmp = ICMPHostPinger.probe(ip: ip, timeout: 0.9)
-                    async let tcp = TCPHostProbe.probe(ip: ip, timeout: 0.9)
-                    let (viaICMP, viaTCP) = await (icmp, tcp)
-                    if let rtt = viaICMP ?? viaTCP {
-                        return HostResult(ip: ip, rttMs: rtt)
-                    }
-                    return nil
-                }
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "ip-range-scan", target: cidr) }
+        catch { errorMessage = error.localizedDescription; isScanning = false; return }
+
+        // Strict single-line policy: one host, one probe method, at a time.
+        for ip in hosts {
+            guard isScanning else { break }
+            var rtt = await ICMPHostPinger.probe(ip: ip, timeout: 0.9)
+            if rtt == nil {
+                rtt = await TCPHostProbe.probe(ip: ip, timeout: 0.9)
             }
-            for await result in group {
-                scanned += 1
-                if let result {
-                    results.append(result)
-                    results.sort { Self.value($0.ip) < Self.value($1.ip) }
-                }
-                if !isScanning { break }
+            scanned += 1
+            if let rtt {
+                results.append(HostResult(ip: ip, rttMs: rtt))
+                results.sort { Self.value($0.ip) < Self.value($1.ip) }
             }
         }
+        await UnifiedNetworkInterface.release(lease)
         isScanning = false
         history.insert("\(cidr) — \(results.count) up / \(total)", at: 0)
         if history.count > 10 { history.removeLast() }
