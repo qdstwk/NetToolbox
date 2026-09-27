@@ -45,9 +45,9 @@ final class DNSCompareViewModel {
         rows = []
         agreement = nil
 
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "dns-compare", target: target)
+            lease = try await UnifiedNetworkInterface.claim(operation: "dns-compare", target: target)
         } catch {
             rows = [DNSCompareRow(id: "busy", resolver: "Network gate", values: [], error: error.localizedDescription)]
             isRunning = false
@@ -64,7 +64,7 @@ final class DNSCompareViewModel {
                 collected.append(DNSCompareRow(id: endpoint.id, resolver: endpoint.name, values: [], error: error.localizedDescription))
             }
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
 
         let order = Self.resolvers.map(\.id)
         collected.sort { (order.firstIndex(of: $0.id) ?? 0) < (order.firstIndex(of: $1.id) ?? 0) }
