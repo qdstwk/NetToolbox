@@ -64,12 +64,14 @@ enum ONVIFError: LocalizedError {
 /// added to the device's local clock when stamping `Created`, so callers can
 /// align to the camera's clock (measured via `measureClockOffset()`) and avoid
 /// skew rejections — important for the frequent PTZ commands.
-struct ONVIFClient: Sendable {
+final class ONVIFClient: @unchecked Sendable {
     let host: String
     let port: UInt16
     let username: String
     let password: String
     var clockOffset: TimeInterval = 0
+    private let sessionLock = NSLock()
+    private var session = URLSession(configuration: .ephemeral)
 
     private var deviceServiceURL: String { "http://\(host):\(port)/onvif/device_service" }
 
@@ -83,22 +85,21 @@ struct ONVIFClient: Sendable {
     /// Interrogates the camera: device info, media service address, profiles and
     /// per-profile stream + snapshot URIs.
     func discover() async throws -> ONVIFDiscovery {
-        var client = self
-        client.clockOffset = await client.measureClockOffset()
+        clockOffset = await measureClockOffset()
 
         var deviceInfo = ONVIFDeviceInfo()
-        if let info = try? await client.fetchDeviceInfo() { deviceInfo = info }
+        if let info = try? await fetchDeviceInfo() { deviceInfo = info }
 
-        let capabilities = try? await client.fetchCapabilities()
-        let mediaXAddr = capabilities?.media ?? client.deviceServiceURL
+        let capabilities = try? await fetchCapabilities()
+        let mediaXAddr = capabilities?.media ?? deviceServiceURL
 
-        var profiles = try await client.fetchProfiles(at: mediaXAddr)
+        var profiles = try await fetchProfiles(at: mediaXAddr)
         guard !profiles.isEmpty else { throw ONVIFError.noProfiles }
 
         for index in profiles.indices {
             let token = profiles[index].token
-            profiles[index].streamURI = try? await client.fetchStreamURI(profileToken: token, at: mediaXAddr)
-            profiles[index].snapshotURI = try? await client.fetchSnapshotURI(profileToken: token, at: mediaXAddr)
+            profiles[index].streamURI = try? await fetchStreamURI(profileToken: token, at: mediaXAddr)
+            profiles[index].snapshotURI = try? await fetchSnapshotURI(profileToken: token, at: mediaXAddr)
         }
 
         return ONVIFDiscovery(deviceInfo: deviceInfo, profiles: profiles, ptzXAddr: capabilities?.ptz)
@@ -208,7 +209,8 @@ struct ONVIFClient: Sendable {
         request.setValue("application/soap+xml; charset=utf-8; action=\"\(action)\"", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(envelope(body: body, authenticated: authenticated).utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let activeSession = currentSession()
+        let (data, response) = try await activeSession.data(for: request)
         let text = String(decoding: data, as: UTF8.self)
         if let http = response as? HTTPURLResponse {
             if http.statusCode == 401 { throw ONVIFError.unauthorized }
@@ -218,6 +220,20 @@ struct ONVIFClient: Sendable {
             }
         }
         return text
+    }
+
+    func cancelNetwork() {
+        sessionLock.lock()
+        let old = session
+        session = URLSession(configuration: .ephemeral)
+        sessionLock.unlock()
+        old.invalidateAndCancel()
+    }
+
+    private func currentSession() -> URLSession {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        return session
     }
 
     private func envelope(body: String, authenticated: Bool) -> String {
