@@ -144,9 +144,11 @@ final class PortScannerViewModel {
             return
         }
 
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         for port in targetPorts {
-            guard isScanning else { break }
-            let probe = await TCPProbe.connectLatency(host: target, port: port, timeout: 1.5)
+            guard isScanning, !cancellation.isCancelled else { break }
+            let probe = await TCPProbe.connectLatency(host: target, port: port, timeout: 1.5, cancellation: cancellation)
             scannedCount += 1
             if (try? probe.get()) != nil {
                 results.append(PortScanResult(
