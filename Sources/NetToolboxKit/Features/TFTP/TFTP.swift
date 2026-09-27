@@ -131,9 +131,9 @@ final class TFTPViewModel {
         preview = ""
         byteCount = 0
 
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "tftp", target: target)
+            lease = try await UnifiedNetworkInterface.claim(operation: "tftp", target: target)
         } catch {
             errorMessage = error.localizedDescription
             isRunning = false
@@ -153,7 +153,7 @@ final class TFTPViewModel {
         case .failure(let message):
             errorMessage = message.description
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
         isRunning = false
     }
 }
