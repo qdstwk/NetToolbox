@@ -102,14 +102,14 @@ final class TelnetViewModel {
         _ = await connection.send(data)
     }
 
-    func disconnect() {
+    func disconnect() async {
         readTask?.cancel()
         readTask = nil
         connection?.cancel()
         connection = nil
         if let lease = networkLease {
             networkLease = nil
-            Task { await UnifiedNetworkInterface.release(lease) }
+            await UnifiedNetworkInterface.release(lease)
         }
         isConnected = false
     }
@@ -183,7 +183,7 @@ struct TelnetView: View {
             HStack {
                 if viewModel.isConnected {
                     Button(L10nString("telnet.disconnect"), role: .destructive) {
-                        viewModel.disconnect()
+                        Task { await viewModel.disconnect() }
                     }
                     .buttonStyle(.borderedProminent)
                     StatusBadge(kind: .success, text: L10n("telnet.connected"))
