@@ -103,6 +103,7 @@ final class MikroTikViewModel {
     var toolID = ""
 
     private var client: MikroTikClient?
+    private var networkLease: UnifiedNetworkInterface.Lease?
     private var lineCounter = 0
 
     /// The whole transcript as plain text, for copy / share.
@@ -133,12 +134,18 @@ final class MikroTikViewModel {
         isBusy = true
         statusMessage = nil
 
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "mikrotik-api", target: target) }
+        catch { statusMessage = error.localizedDescription; isBusy = false; return }
+
         guard let client = MikroTikClient(host: target, port: port, tls: useTLS) else {
+            await UnifiedNetworkInterface.release(lease)
             statusMessage = String(localized: "error.probe.invalidHost", bundle: .module)
             isBusy = false
             return
         }
         if case .failure(let error) = await client.connect(timeout: 8) {
+            await UnifiedNetworkInterface.release(lease)
             statusMessage = error.localizedDescription
             isBusy = false
             return
@@ -146,10 +153,13 @@ final class MikroTikViewModel {
         if let loginError = await client.login(user: user, password: password, timeout: 8) {
             statusMessage = loginError
             client.cancel()
+            await UnifiedNetworkInterface.release(lease)
             isBusy = false
             return
         }
         self.client = client
+        networkLease = lease
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { client.cancel() }
         isConnected = true
         isBusy = false
         append(.info, "\(L10nString("mikrotik.connected")) \(user)@\(target)")
@@ -227,6 +237,10 @@ final class MikroTikViewModel {
     func disconnect() {
         client?.cancel()
         client = nil
+        if let lease = networkLease {
+            networkLease = nil
+            Task { await UnifiedNetworkInterface.release(lease) }
+        }
         isConnected = false
     }
 }
