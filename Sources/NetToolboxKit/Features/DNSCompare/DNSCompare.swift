@@ -45,21 +45,26 @@ final class DNSCompareViewModel {
         rows = []
         agreement = nil
 
-        var collected: [DNSCompareRow] = []
-        await withTaskGroup(of: DNSCompareRow.self) { group in
-            for endpoint in Self.resolvers {
-                group.addTask {
-                    do {
-                        let records = try await resolver.resolve(name: target, type: recordType, server: endpoint.host)
-                        let values = records.filter { $0.type == recordType }.map { $0.value }.sorted()
-                        return DNSCompareRow(id: endpoint.id, resolver: endpoint.name, values: values, error: nil)
-                    } catch {
-                        return DNSCompareRow(id: endpoint.id, resolver: endpoint.name, values: [], error: error.localizedDescription)
-                    }
-                }
-            }
-            for await row in group { collected.append(row) }
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "dns-compare", target: target)
+        } catch {
+            rows = [DNSCompareRow(id: "busy", resolver: "Network gate", values: [], error: error.localizedDescription)]
+            isRunning = false
+            return
         }
+
+        var collected: [DNSCompareRow] = []
+        for endpoint in Self.resolvers {
+            do {
+                let records = try await resolver.resolve(name: target, type: recordType, server: endpoint.host)
+                let values = records.filter { $0.type == recordType }.map { $0.value }.sorted()
+                collected.append(DNSCompareRow(id: endpoint.id, resolver: endpoint.name, values: values, error: nil))
+            } catch {
+                collected.append(DNSCompareRow(id: endpoint.id, resolver: endpoint.name, values: [], error: error.localizedDescription))
+            }
+        }
+        await GlobalNetworkOperationGate.shared.release(lease)
 
         let order = Self.resolvers.map(\.id)
         collected.sort { (order.firstIndex(of: $0.id) ?? 0) < (order.firstIndex(of: $1.id) ?? 0) }
