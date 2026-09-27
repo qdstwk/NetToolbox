@@ -179,15 +179,11 @@ struct SSLInspector: SSLInspecting {
             ("TLS 1.1", tls_protocol_version_t(rawValue: 0x0302) ?? .TLSv12),
             ("TLS 1.2", .TLSv12), ("TLS 1.3", .TLSv13),
         ]
-        let supported = await withTaskGroup(of: (Int, String)?.self) { group in
-            for (index, entry) in versions.enumerated() {
-                group.addTask {
-                    await Self.supports(host: cleanHost, port: port, version: entry.1) ? (index, entry.0) : nil
-                }
+        var supported: [(Int, String)] = []
+        for (index, entry) in versions.enumerated() {
+            if await Self.supports(host: cleanHost, port: port, version: entry.1) {
+                supported.append((index, entry.0))
             }
-            var found: [(Int, String)] = []
-            for await result in group { if let result { found.append(result) } }
-            return found
         }
         return supported.sorted { $0.0 < $1.0 }.map(\.1)
     }
@@ -253,6 +249,13 @@ final class SSLCheckerViewModel {
         }
         output = .loading
         audit = nil
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "ssl-check", target: trimmed)
+        } catch {
+            output = .failure(error.localizedDescription)
+            return
+        }
         let result = await inspector.inspect(host: trimmed, port: port)
         switch result {
         case .success(let info):
@@ -266,6 +269,7 @@ final class SSLCheckerViewModel {
         case .failure(let error):
             output = .failure(error.localizedDescription)
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
     }
 }
 
