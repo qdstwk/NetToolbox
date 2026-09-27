@@ -249,9 +249,9 @@ final class SSLCheckerViewModel {
         }
         output = .loading
         audit = nil
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "ssl-check", target: trimmed)
+            lease = try await UnifiedNetworkInterface.claim(operation: "ssl-check", target: trimmed)
         } catch {
             output = .failure(error.localizedDescription)
             return
@@ -269,7 +269,7 @@ final class SSLCheckerViewModel {
         case .failure(let error):
             output = .failure(error.localizedDescription)
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
