@@ -25,7 +25,13 @@ struct HTTPTimingService: Sendable {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         let collector = TimingCollector()
-        let (_, response) = try await URLSession(configuration: .ephemeral).data(for: request, delegate: collector)
+        let lease = try await UnifiedNetworkInterface.claim(operation: "http-timing", target: url.host ?? text)
+        let session = URLSession(configuration: .ephemeral)
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { session.invalidateAndCancel() }
+        let response: URLResponse
+        do { (_, response) = try await session.data(for: request, delegate: collector) }
+        catch { await UnifiedNetworkInterface.release(lease); throw error }
+        await UnifiedNetworkInterface.release(lease)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard let tx = collector.metrics?.transactionMetrics.last else { throw NetworkServiceError.decoding }
 
@@ -65,14 +71,6 @@ final class HTTPTimingViewModel {
         isRunning = true
         errorMessage = nil
         phases = []
-        let lease: UnifiedNetworkInterface.Lease
-        do {
-            lease = try await UnifiedNetworkInterface.claim(operation: "http-timing", target: url)
-        } catch {
-            errorMessage = error.localizedDescription
-            isRunning = false
-            return
-        }
         do {
             let result = try await service.measure(urlString: url)
             phases = result.phases
@@ -81,7 +79,6 @@ final class HTTPTimingViewModel {
         } catch {
             errorMessage = error.localizedDescription
         }
-        await UnifiedNetworkInterface.release(lease)
         isRunning = false
     }
 }
