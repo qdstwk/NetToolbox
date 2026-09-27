@@ -12,8 +12,8 @@ extension Notification.Name {
 /// across the user's devices; SSH/camera secrets stay in the local Keychain and
 /// never leave the device, so the app still collects no data off-device.
 ///
-/// Last-writer-wins: local state is pushed when the app backgrounds, and remote
-/// changes are pulled on launch and whenever iCloud reports an external change.
+/// Strict foreground policy: no launch/background/external-change auto-sync.
+/// Sync occurs only after an explicit user action.
 @MainActor
 @Observable
 final class CloudSync {
@@ -26,35 +26,32 @@ final class CloudSync {
     ]
 
     private(set) var isEnabled: Bool
-    private var observer: NSObjectProtocol?
 
     init() {
         isEnabled = UserDefaults.standard.bool(forKey: enabledKey)
     }
 
-    /// Starts syncing if enabled: registers for external changes and pulls.
-    func start() {
-        guard isEnabled else { return }
-        registerObserver()
-        NSUbiquitousKeyValueStore.default.synchronize()
-        pull()
-    }
+    /// No automatic network work. Enabling only records the preference.
+    /// Synchronization must be initiated explicitly by the user while foregrounded.
+    func start() {}
 
     func setEnabled(_ on: Bool) {
         isEnabled = on
         UserDefaults.standard.set(on, forKey: enabledKey)
-        if on {
-            registerObserver()
-            pushAll()
-            NSUbiquitousKeyValueStore.default.synchronize()
-            pull()
-        } else {
-            removeObserver()
-        }
+
     }
 
-    /// Pushes the current local values to iCloud. Call when the app backgrounds.
-    func pushAll() {
+    /// Explicit foreground-only synchronization requested by the user.
+    func syncNow() async throws {
+        guard isEnabled else { return }
+        let lease = try await UnifiedNetworkInterface.claim(operation: "icloud-sync", target: "icloud-key-value-store")
+        defer { Task { await UnifiedNetworkInterface.release(lease) } }
+        pushAllLocal()
+        NSUbiquitousKeyValueStore.default.synchronize()
+        pullLocal()
+    }
+
+    private func pushAllLocal() {
         guard isEnabled else { return }
         let defaults = UserDefaults.standard
         let store = NSUbiquitousKeyValueStore.default
@@ -70,7 +67,7 @@ final class CloudSync {
 
     // MARK: - Private
 
-    private func pull() {
+    private func pullLocal() {
         let defaults = UserDefaults.standard
         let store = NSUbiquitousKeyValueStore.default
         var changed = false
@@ -88,21 +85,5 @@ final class CloudSync {
         }
     }
 
-    private func registerObserver() {
-        guard observer == nil else { return }
-        observer = NotificationCenter.default.addObserver(
-            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
-            object: NSUbiquitousKeyValueStore.default,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.pull() }
-        }
-    }
-
-    private func removeObserver() {
-        if let observer {
-            NotificationCenter.default.removeObserver(observer)
-            self.observer = nil
-        }
     }
 }
