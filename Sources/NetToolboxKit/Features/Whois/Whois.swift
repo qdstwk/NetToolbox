@@ -3,7 +3,7 @@ import Observation
 
 /// Performs a WHOIS query (TCP port 43) against a referral chain.
 protocol WhoisQuerying: Sendable {
-    func query(_ domain: String) async throws -> String
+    func query(_ domain: String, cancellation: NetworkCancellationHandle) async throws -> String
 }
 
 struct WhoisService: WhoisQuerying {
@@ -22,7 +22,7 @@ struct WhoisService: WhoisQuerying {
         }
     }
 
-    func query(_ domain: String) async throws -> String {
+    func query(_ domain: String, cancellation: NetworkCancellationHandle) async throws -> String {
         let clean = domain.trimmingCharacters(in: .whitespaces).lowercased()
         guard !clean.isEmpty else { throw NetProbeError.invalidHost }
         let server = Self.server(for: clean)
@@ -30,6 +30,8 @@ struct WhoisService: WhoisQuerying {
         guard let connection = TCPConnection(host: server, port: 43) else {
             throw NetProbeError.invalidHost
         }
+        cancellation.install { connection.cancel() }
+        if cancellation.isCancelled { throw CancellationError() }
         if case .failure(let error) = await connection.open(timeout: 8) {
             connection.cancel()
             throw error
@@ -43,6 +45,7 @@ struct WhoisService: WhoisQuerying {
         }
         let result = await connection.receiveAll(timeout: 8)
         connection.cancel()
+        cancellation.clear()
         switch result {
         case .success(let data):
             let text = String(decoding: data, as: UTF8.self)
@@ -82,8 +85,10 @@ final class WhoisViewModel {
             output = .failure(error.localizedDescription)
             return
         }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         do {
-            let text = try await service.query(trimmed)
+            let text = try await service.query(trimmed, cancellation: cancellation)
             output = .success(text)
         } catch {
             output = .failure(error.localizedDescription)
