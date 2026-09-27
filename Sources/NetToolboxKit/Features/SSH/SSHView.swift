@@ -40,7 +40,7 @@ final class SSHViewModel {
     var toolID = ""
     private var shellClient: SSHClient?
     private var readTask: Task<Void, Never>?
-    private var shellNetworkLease: GlobalNetworkOperationGate.Lease?
+    private var shellNetworkLease: UnifiedNetworkInterface.Lease?
 
     private func makeAuth() -> SSHAuth? {
         if useKey {
@@ -95,14 +95,14 @@ final class SSHViewModel {
         hostKeyTrust = nil
         guard let (client, auth) = makeClient() else { return }
         let target = host.trimmingCharacters(in: .whitespaces)
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "ssh-exec", target: target)
+            lease = try await UnifiedNetworkInterface.claim(operation: "ssh-exec", target: target)
         } catch {
             errorMessage = error.localizedDescription
             return
         }
-        defer { Task { await GlobalNetworkOperationGate.shared.release(lease) } }
+        defer { Task { await UnifiedNetworkInterface.release(lease) } }
         isRunning = true
         let user = username.trimmingCharacters(in: .whitespaces)
         let command = self.command
@@ -125,9 +125,9 @@ final class SSHViewModel {
         hostKeyTrust = nil
         guard let (client, auth) = makeClient() else { return }
         let target = host.trimmingCharacters(in: .whitespaces)
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "ssh-shell", target: target)
+            lease = try await UnifiedNetworkInterface.claim(operation: "ssh-shell", target: target)
         } catch {
             errorMessage = error.localizedDescription
             return
@@ -142,7 +142,7 @@ final class SSHViewModel {
             shellConnected = true
             startReading(client)
         } catch {
-            await GlobalNetworkOperationGate.shared.release(lease)
+            await UnifiedNetworkInterface.release(lease)
             errorMessage = error.localizedDescription + "\n\(client.diagnostics) · stage=\(client.stage)"
         }
         isRunning = false
@@ -158,13 +158,13 @@ final class SSHViewModel {
                     break
                 }
             }
-            let lease = await MainActor.run { () -> GlobalNetworkOperationGate.Lease? in
+            let lease = await MainActor.run { () -> UnifiedNetworkInterface.Lease? in
                 let lease = self?.shellNetworkLease
                 self?.shellNetworkLease = nil
                 self?.shellConnected = false
                 return lease
             }
-            if let lease { await GlobalNetworkOperationGate.shared.release(lease) }
+            if let lease { await UnifiedNetworkInterface.release(lease) }
         }
     }
 
@@ -187,7 +187,7 @@ final class SSHViewModel {
         shellClient = nil
         if let lease = shellNetworkLease {
             shellNetworkLease = nil
-            Task { await GlobalNetworkOperationGate.shared.release(lease) }
+            Task { await UnifiedNetworkInterface.release(lease) }
         }
         shellConnected = false
     }
