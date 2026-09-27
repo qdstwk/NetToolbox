@@ -19,9 +19,9 @@ enum TCPTraceProbe {
         let port: UInt16
     }
 
-    static func trace(host: String, maxHops: Int, timeout: Double) async -> Result? {
+    static func trace(host: String, maxHops: Int, timeout: Double, cancellation: NetworkCancellationHandle) async -> Result? {
         for port in ports {
-            if let result = await distance(host: host, port: port, maxHops: maxHops, timeout: timeout) {
+            if let result = await distance(host: host, port: port, maxHops: maxHops, timeout: timeout, cancellation: cancellation) {
                 return result
             }
         }
@@ -29,27 +29,27 @@ enum TCPTraceProbe {
     }
 
     /// Probes TTLs strictly one at a time; first reach is the hop distance.
-    private static func distance(host: String, port: UInt16, maxHops: Int, timeout: Double) async -> Result? {
+    private static func distance(host: String, port: UInt16, maxHops: Int, timeout: Double, cancellation: NetworkCancellationHandle) async -> Result? {
         for ttl in 1...maxHops {
-            if Task.isCancelled { return nil }
-            if let hit = await reach(host: host, port: port, ttl: ttl, timeout: timeout) {
+            if Task.isCancelled || cancellation.isCancelled { return nil }
+            if let hit = await reach(host: host, port: port, ttl: ttl, timeout: timeout, cancellation: cancellation) {
                 return Result(hops: hit.0, rttMs: hit.1, port: port)
             }
         }
         return nil
     }
 
-    private static func reach(host: String, port: UInt16, ttl: Int, timeout: Double) async -> (Int, Double)? {
+    private static func reach(host: String, port: UInt16, ttl: Int, timeout: Double, cancellation: NetworkCancellationHandle) async -> (Int, Double)? {
         await withCheckedContinuation { continuation in
             let shot = OneShot(continuation)
             DispatchQueue.global(qos: .userInitiated).async {
-                shot.resume(blockingReach(host: host, port: port, ttl: ttl, timeout: timeout))
+                shot.resume(blockingReach(host: host, port: port, ttl: ttl, timeout: timeout, cancellation: cancellation))
             }
         }
     }
 
     #if canImport(Darwin)
-    private static func blockingReach(host: String, port: UInt16, ttl: Int, timeout: Double) -> (Int, Double)? {
+    private static func blockingReach(host: String, port: UInt16, ttl: Int, timeout: Double, cancellation: NetworkCancellationHandle) -> (Int, Double)? {
         var hints = addrinfo(
             ai_flags: 0, ai_family: AF_INET, ai_socktype: SOCK_STREAM,
             ai_protocol: IPPROTO_TCP, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil
@@ -63,9 +63,11 @@ enum TCPTraceProbe {
         memcpy(&dest, addr, Int(MemoryLayout<sockaddr_in>.size))
         freeaddrinfo(info)
 
+        if cancellation.isCancelled { return nil }
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
-        defer { close(fd) }
+        let owner = TraceSocketOwner(fd)
+        defer { owner.closeIfOpen(); cancellation.clear() }
 
         var ttlValue = Int32(ttl)
         setsockopt(fd, IPPROTO_IP, IP_TTL, &ttlValue, socklen_t(MemoryLayout<Int32>.size))
@@ -87,6 +89,8 @@ enum TCPTraceProbe {
         if result == 0 { return (ttl, elapsedMs()) }                     // reached instantly
         if result < 0, errno == ECONNREFUSED { return (ttl, elapsedMs()) } // reached (refused)
         if result < 0, errno != EINPROGRESS { return nil }
+        cancellation.install { owner.cancel() }
+        if cancellation.isCancelled { return nil }
 
         var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
         guard poll(&pfd, 1, Int32(max(1, timeout * 1000))) > 0 else { return nil }   // TTL too small
@@ -96,7 +100,17 @@ enum TCPTraceProbe {
         if socketError == 0 || socketError == ECONNREFUSED { return (ttl, elapsedMs()) }
         return nil
     }
+    private final class TraceSocketOwner: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fd: Int32?
+        init(_ fd: Int32) { self.fd = fd }
+        func cancel() {
+            lock.lock(); let value = fd; fd = nil; lock.unlock()
+            if let value { close(value) }
+        }
+        func closeIfOpen() { cancel() }
+    }
     #else
-    private static func blockingReach(host: String, port: UInt16, ttl: Int, timeout: Double) -> (Int, Double)? { nil }
+    private static func blockingReach(host: String, port: UInt16, ttl: Int, timeout: Double, cancellation: NetworkCancellationHandle) -> (Int, Double)? { nil }
     #endif
 }
