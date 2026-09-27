@@ -65,7 +65,6 @@ struct NetworkOverviewView: View {
         .background(theme.background)
         .navigationTitle(Text(L10n("tool.overview.title")))
         .navigationBarTitleDisplayMode(.large)
-        .task { if case .idle = viewModel.publicState { await viewModel.refresh() } }
         .refreshable { await viewModel.refresh() }
     }
 
@@ -94,7 +93,9 @@ struct NetworkOverviewView: View {
     private var publicCard: some View {
         SectionCard(title: L10n("overview.section.public"), systemImage: "globe") {
             switch viewModel.publicState {
-            case .idle, .loading:
+            case .idle:
+                Text(L10n("common.refresh")).foregroundStyle(theme.textSecondary)
+            case .loading:
                 HStack(spacing: Spacing.md) {
                     ProgressView()
                     Text(L10n("common.loading")).foregroundStyle(theme.textSecondary)
