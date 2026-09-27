@@ -3,10 +3,12 @@ import Observation
 
 /// Queries a memcached server's `version` and `stats` over its text protocol.
 struct MemcachedService: Sendable {
-    func stats(host: String, port: UInt16) async -> Result<String, EngineError> {
+    func stats(host: String, port: UInt16, cancellation: NetworkCancellationHandle) async -> Result<String, EngineError> {
         guard let connection = TCPConnection(host: host, port: port) else {
             return .failure(EngineError(L10nString("banner.error.host")))
         }
+        cancellation.install { connection.cancel() }
+        if cancellation.isCancelled { return .failure(EngineError("Cancelled")) }
         if case .failure(let error) = await connection.open(timeout: 6) {
             connection.cancel()
             return .failure(EngineError(error.localizedDescription))
@@ -14,6 +16,7 @@ struct MemcachedService: Sendable {
         _ = await connection.send(Data("version\r\nstats\r\n".utf8))
         let result = await connection.receiveAll(timeout: 3)
         connection.cancel()
+        cancellation.clear()
         switch result {
         case .success(let data):
             let text = String(decoding: data, as: UTF8.self)
@@ -45,10 +48,12 @@ final class MemcachedViewModel {
             errorMessage = error.localizedDescription
             return
         }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         isRunning = true
         output = nil
         errorMessage = nil
-        let result = await service.stats(host: target, port: port)
+        let result = await service.stats(host: target, port: port, cancellation: cancellation)
         switch result {
         case .success(let text): output = text
         case .failure(let message): errorMessage = message.description
