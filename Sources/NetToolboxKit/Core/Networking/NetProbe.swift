@@ -209,6 +209,33 @@ final class TCPConnection: @unchecked Sendable {
         }
     }
 
+    /// Receives one chunk with a hard deadline. Timeout tears down the
+    /// connection so a silent peer cannot hold an await indefinitely.
+    func receive(maxLength: Int = 65536, timeout: Double) async -> Result<Data, NetProbeError> {
+        await withCheckedContinuation { continuation in
+            let shot = OneShot(continuation)
+            let connection = self.connection
+            let timeoutWork = DispatchWorkItem {
+                connection.cancel()
+                shot.resume(.failure(.timeout))
+            }
+            queue.asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: maxLength) {
+                data, _, isComplete, error in
+                timeoutWork.cancel()
+                if let error {
+                    shot.resume(.failure(.connection(error.localizedDescription)))
+                } else if let data, !data.isEmpty {
+                    shot.resume(.success(data))
+                } else if isComplete {
+                    shot.resume(.success(Data()))
+                } else {
+                    shot.resume(.success(Data()))
+                }
+            }
+        }
+    }
+
     /// Reads until the peer closes the connection, accumulating all bytes.
     func receiveAll(timeout: Double) async -> Result<Data, NetProbeError> {
         // A per-call `receive()` has no timeout of its own, so bound the whole
