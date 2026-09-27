@@ -4,41 +4,6 @@ import Observation
 import Darwin
 #endif
 
-/// Reverse DNS (PTR) resolution via `getnameinfo`.
-enum ReverseDNS {
-    static func hostname(for ip: String) async -> String? {
-        await withCheckedContinuation { continuation in
-            let shot = OneShot(continuation)
-            DispatchQueue.global(qos: .userInitiated).async {
-                shot.resume(blockingReverse(ip))
-            }
-        }
-    }
-
-    #if canImport(Darwin)
-    private static func blockingReverse(_ ip: String) -> String? {
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        guard ip.withCString({ inet_pton(AF_INET, $0, &address.sin_addr) }) == 1 else { return nil }
-
-        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        let result = withUnsafePointer(to: &address) { pointer -> Int32 in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                getnameinfo(
-                    sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size),
-                    &host, socklen_t(host.count), nil, 0, NI_NAMEREQD
-                )
-            }
-        }
-        guard result == 0 else { return nil }
-        let name = String(cBuffer: host)
-        return name.isEmpty ? nil : name
-    }
-    #else
-    private static func blockingReverse(_ ip: String) -> String? { nil }
-    #endif
-}
-
 @MainActor
 @Observable
 final class NSLookupViewModel {
@@ -51,12 +16,6 @@ final class NSLookupViewModel {
 
     var query = ""
     private(set) var output: Output = .idle
-
-    private let resolver: any HostResolving
-
-    init(resolver: any HostResolving = SystemHostResolver()) {
-        self.resolver = resolver
-    }
 
     var isReverse: Bool { InputClassifier.isIPv4(query.trimmingCharacters(in: .whitespaces)) }
 
