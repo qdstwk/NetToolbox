@@ -4,10 +4,12 @@ import Observation
 /// Connects to an SMTP server and runs a short EHLO handshake, showing the
 /// banner and advertised capabilities — a quick server health / capability probe.
 struct SMTPService: Sendable {
-    func probe(host: String, port: UInt16, tls: Bool) async -> Result<String, EngineError> {
+    func probe(host: String, port: UInt16, tls: Bool, cancellation: NetworkCancellationHandle) async -> Result<String, EngineError> {
         guard let connection = TCPConnection(host: host, port: port, tls: tls) else {
             return .failure(EngineError(L10nString("banner.error.host")))
         }
+        cancellation.install { connection.cancel() }
+        if cancellation.isCancelled { return .failure(EngineError("Cancelled")) }
         if case .failure(let error) = await connection.open(timeout: 6) {
             connection.cancel()
             return .failure(EngineError(error.localizedDescription))
@@ -30,6 +32,7 @@ struct SMTPService: Sendable {
         await send("QUIT")
         await read()
         connection.cancel()
+        cancellation.clear()
         return log.isEmpty ? .failure(EngineError(L10nString("banner.empty"))) : .success(log)
     }
 }
@@ -56,10 +59,12 @@ final class SMTPViewModel {
             errorMessage = error.localizedDescription
             return
         }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         isRunning = true
         output = nil
         errorMessage = nil
-        let result = await service.probe(host: target, port: port, tls: tls)
+        let result = await service.probe(host: target, port: port, tls: tls, cancellation: cancellation)
         switch result {
         case .success(let text): output = text
         case .failure(let message): errorMessage = message.description
