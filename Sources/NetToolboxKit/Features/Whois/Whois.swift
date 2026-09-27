@@ -75,12 +75,20 @@ final class WhoisViewModel {
         let trimmed = domain.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { output = .idle; return }
         output = .loading
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "whois", target: trimmed)
+        } catch {
+            output = .failure(error.localizedDescription)
+            return
+        }
         do {
             let text = try await service.query(trimmed)
             output = .success(text)
         } catch {
             output = .failure(error.localizedDescription)
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
     }
 }
 
