@@ -34,7 +34,11 @@ protocol PingProviding: Sendable {
 
 struct TCPPingService: PingProviding {
     func attempt(host: String, port: UInt16, timeout: Double) async -> PingAttempt {
-        let result = await TCPProbe.connectLatency(host: host, port: port, timeout: timeout)
+        await attempt(host: host, port: port, timeout: timeout, cancellation: nil)
+    }
+
+    func attempt(host: String, port: UInt16, timeout: Double, cancellation: NetworkCancellationHandle?) async -> PingAttempt {
+        let result = await TCPProbe.connectLatency(host: host, port: port, timeout: timeout, cancellation: cancellation)
         switch result {
         case .success(let duration):
             let ms = Double(duration.components.seconds) * 1000
