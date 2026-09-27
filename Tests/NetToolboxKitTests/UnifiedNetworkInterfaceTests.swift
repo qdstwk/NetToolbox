@@ -16,13 +16,15 @@ final class UnifiedNetworkInterfaceTests: XCTestCase {
         await UnifiedNetworkInterface.release(first)
         let second = try await UnifiedNetworkInterface.claim(operation: "test-b", target: "b")
         await UnifiedNetworkInterface.release(first)
-        XCTAssertEqual(await UnifiedNetworkInterface.activeOperation()?.operation, "test-b")
+        let activeAfterStaleRelease = await UnifiedNetworkInterface.activeOperation()?.operation
+        XCTAssertEqual(activeAfterStaleRelease, "test-b")
 
         let counter = CancellationCounter()
         await UnifiedNetworkInterface.registerCancellation(for: second) { counter.hit() }
         await UnifiedNetworkInterface.setForegroundActive(false, generation: 10_001)
         XCTAssertEqual(counter.value, 1)
-        XCTAssertNil(await UnifiedNetworkInterface.activeOperation())
+        let activeAfterRevocation = await UnifiedNetworkInterface.activeOperation()
+        XCTAssertNil(activeAfterRevocation)
 
         await UnifiedNetworkInterface.setForegroundActive(true, generation: 10_000)
         do {
@@ -33,7 +35,8 @@ final class UnifiedNetworkInterfaceTests: XCTestCase {
         }
 
         await UnifiedNetworkInterface.setForegroundActive(true, generation: 10_002)
-        XCTAssertNil(await UnifiedNetworkInterface.activeOperation(), "Foreground return must not resurrect old work")
+        let activeAfterForegroundReturn = await UnifiedNetworkInterface.activeOperation()
+        XCTAssertNil(activeAfterForegroundReturn, "Foreground return must not resurrect old work")
         let final = try await UnifiedNetworkInterface.claim(operation: "final", target: "final")
         await UnifiedNetworkInterface.release(final)
     }
