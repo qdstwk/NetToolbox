@@ -55,26 +55,29 @@ enum TCPHostProbe {
     /// Ports common enough that most devices expose or actively refuse one.
     static let ports: [UInt16] = [80, 443, 22, 445, 139, 8080, 62078, 53]
 
-    static func probe(ip: String, timeout: Double) async -> Double? {
+    static func probe(ip: String, timeout: Double, cancellation: NetworkCancellationHandle) async -> Double? {
         await withCheckedContinuation { continuation in
             let shot = OneShot(continuation)
             DispatchQueue.global(qos: .userInitiated).async {
-                shot.resume(blockingProbe(ip: ip, timeout: timeout))
+                shot.resume(blockingProbe(ip: ip, timeout: timeout, cancellation: cancellation))
             }
         }
     }
 
     #if canImport(Darwin)
-    private static func blockingProbe(ip: String, timeout: Double) -> Double? {
+    private static func blockingProbe(ip: String, timeout: Double, cancellation: NetworkCancellationHandle) -> Double? {
         var template = sockaddr_in()
         template.sin_family = sa_family_t(AF_INET)
         guard ip.withCString({ inet_pton(AF_INET, $0, &template.sin_addr) }) == 1 else { return nil }
 
         let clock = ContinuousClock()
         let start = clock.now
+        let owner = HostProbeSocketOwner()
         var descriptors: [Int32] = []
         var polls: [pollfd] = []
-        defer { descriptors.forEach { close($0) } }
+        defer { owner.cancel(); cancellation.clear() }
+        cancellation.install { owner.cancel() }
+        if cancellation.isCancelled { return nil }
 
         for port in ports {
             let fd = socket(AF_INET, SOCK_STREAM, 0)
@@ -92,6 +95,7 @@ enum TCPHostProbe {
             if result < 0, errno == ECONNREFUSED { close(fd); return elapsedMs(start, clock) }
             if result < 0, errno != EINPROGRESS { close(fd); continue }
             descriptors.append(fd)
+            owner.add(fd)
             polls.append(pollfd(fd: fd, events: Int16(POLLOUT), revents: 0))
         }
 
@@ -108,12 +112,18 @@ enum TCPHostProbe {
         return nil
     }
 
+    private final class HostProbeSocketOwner: @unchecked Sendable {
+        private let lock = NSLock(); private var fds: [Int32] = []
+        func add(_ fd: Int32) { lock.lock(); fds.append(fd); lock.unlock() }
+        func cancel() { lock.lock(); let values = fds; fds.removeAll(); lock.unlock(); values.forEach { close($0) } }
+    }
+
     private static func elapsedMs(_ start: ContinuousClock.Instant, _ clock: ContinuousClock) -> Double {
         let elapsed = start.duration(to: clock.now)
         return Double(elapsed.components.seconds) * 1000
             + Double(elapsed.components.attoseconds) / 1_000_000_000_000_000
     }
     #else
-    private static func blockingProbe(ip: String, timeout: Double) -> Double? { nil }
+    private static func blockingProbe(ip: String, timeout: Double, cancellation: NetworkCancellationHandle) -> Double? { nil }
     #endif
 }
