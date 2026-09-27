@@ -2,8 +2,9 @@ import XCTest
 @testable import NetToolboxKit
 
 final class UnifiedNetworkInterfaceTests: XCTestCase {
-    func testExclusiveAdmissionAndStaleRelease() async throws {
+    func testFailClosedLifecycleAndExclusiveAdmission() async throws {
         await UnifiedNetworkInterface.setForegroundActive(true, generation: 10_000)
+
         let first = try await UnifiedNetworkInterface.claim(operation: "test-a", target: "a")
         do {
             _ = try await UnifiedNetworkInterface.claim(operation: "test-b", target: "b")
@@ -11,43 +12,30 @@ final class UnifiedNetworkInterfaceTests: XCTestCase {
         } catch UnifiedNetworkInterface.InterfaceError.busy {
             // expected
         }
+
         await UnifiedNetworkInterface.release(first)
         let second = try await UnifiedNetworkInterface.claim(operation: "test-b", target: "b")
-        await UnifiedNetworkInterface.release(first) // stale release must not clear second
+        await UnifiedNetworkInterface.release(first)
         XCTAssertEqual(await UnifiedNetworkInterface.activeOperation()?.operation, "test-b")
-        await UnifiedNetworkInterface.release(second)
-    }
 
-    func testForegroundRevocationCancelsAndDoesNotRestoreLease() async throws {
-        await UnifiedNetworkInterface.setForegroundActive(true, generation: 20_000)
-        let lease = try await UnifiedNetworkInterface.claim(operation: "test-c", target: "c")
         let counter = CancellationCounter()
-        await UnifiedNetworkInterface.registerCancellation(for: lease) { counter.hit() }
-
-        await UnifiedNetworkInterface.setForegroundActive(false, generation: 20_001)
+        await UnifiedNetworkInterface.registerCancellation(for: second) { counter.hit() }
+        await UnifiedNetworkInterface.setForegroundActive(false, generation: 10_001)
         XCTAssertEqual(counter.value, 1)
         XCTAssertNil(await UnifiedNetworkInterface.activeOperation())
 
-        do {
-            _ = try await UnifiedNetworkInterface.claim(operation: "test-d", target: "d")
-            XCTFail("Background admission must fail")
-        } catch UnifiedNetworkInterface.InterfaceError.foregroundRequired {
-            // expected
-        }
-
-        await UnifiedNetworkInterface.setForegroundActive(true, generation: 20_002)
-        XCTAssertNil(await UnifiedNetworkInterface.activeOperation(), "Foreground return must not resurrect old work")
-    }
-
-    func testStaleLifecycleUpdateCannotReenableNetworking() async throws {
-        await UnifiedNetworkInterface.setForegroundActive(false, generation: 30_001)
-        await UnifiedNetworkInterface.setForegroundActive(true, generation: 30_000)
+        await UnifiedNetworkInterface.setForegroundActive(true, generation: 10_000)
         do {
             _ = try await UnifiedNetworkInterface.claim(operation: "stale", target: "stale")
-            XCTFail("Older lifecycle update must be ignored")
+            XCTFail("Older lifecycle update must not re-enable networking")
         } catch UnifiedNetworkInterface.InterfaceError.foregroundRequired {
             // expected
         }
+
+        await UnifiedNetworkInterface.setForegroundActive(true, generation: 10_002)
+        XCTAssertNil(await UnifiedNetworkInterface.activeOperation(), "Foreground return must not resurrect old work")
+        let final = try await UnifiedNetworkInterface.claim(operation: "final", target: "final")
+        await UnifiedNetworkInterface.release(final)
     }
 }
 
