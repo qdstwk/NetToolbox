@@ -182,14 +182,14 @@ final class SSHViewModel {
         try? await client.sendShell(line)
     }
 
-    func disconnectShell() {
+    func disconnectShell() async {
         readTask?.cancel()
         readTask = nil
         shellClient?.close()
         shellClient = nil
         if let lease = shellNetworkLease {
             shellNetworkLease = nil
-            Task { await UnifiedNetworkInterface.release(lease) }
+            await UnifiedNetworkInterface.release(lease)
         }
         shellConnected = false
     }
@@ -474,7 +474,7 @@ struct SSHView: View {
                     .buttonStyle(.borderedProminent)
                 }
                 Button(L10nString("ssh.shell.disconnect"), role: .destructive) {
-                    viewModel.disconnectShell()
+                    Task { await viewModel.disconnectShell() }
                 }
                 .buttonStyle(.bordered)
             } else {
