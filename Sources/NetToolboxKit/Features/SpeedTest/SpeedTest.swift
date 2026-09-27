@@ -53,9 +53,8 @@ struct CloudflareSpeedEngine: Sendable {
     private let downloadSeconds = 8.0
     private let uploadSeconds = 6.0
     private let warmupSeconds = 1.0
-    /// Several concurrent transfers keep a fast link saturated (a single
-    /// HTTP/2 stream can't), so the reading isn't underestimated.
-    private let parallelStreams = 3
+    /// Strict single-line policy: exactly one throughput request at a time.
+    private let parallelStreams = 1
 
     private var session: URLSession {
         let configuration = URLSessionConfiguration.ephemeral
@@ -78,28 +77,6 @@ struct CloudflareSpeedEngine: Sendable {
                     continuation.yield(.latency(ms: ping, jitter: jitter))
 
                     continuation.yield(.phase(.download))
-                    // Sample latency *under load* across the download+upload
-                    // window to measure bufferbloat and probe-level loss.
-                    async let loaded = sampleLoadedLatency(duration: downloadSeconds + uploadSeconds + 2)
-
-                    let download = try await measureDownload { continuation.yield(.liveDownload($0)) }
-                    continuation.yield(.finalDownload(download))
-
-                    continuation.yield(.phase(.upload))
-                    let upload = try await measureUpload { continuation.yield(.liveUpload($0)) }
-                    continuation.yield(.finalUpload(upload))
-
-                    let loadedResult = await loaded
-                    if let loadedAvg = loadedResult.avg {
-                        let increase = max(0, loadedAvg - ping)
-                        continuation.yield(.bufferbloat(
-                            idle: ping, loaded: loadedAvg, increase: increase,
-                            grade: BufferbloatGrade.grade(increaseMs: increase)
-                        ))
-                    }
-                    if loadedResult.sent > 0 {
-                        continuation.yield(.loss(Double(loadedResult.failed) / Double(loadedResult.sent) * 100))
-                    }
 
                     continuation.yield(.phase(.finished))
                     continuation.finish()
@@ -203,21 +180,13 @@ struct CloudflareSpeedEngine: Sendable {
         let start = clock.now
         let sampler = liveSampler(counter: counter, snapshot: snapshot, start: start, clock: clock, live: live)
 
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<parallelStreams {
-                group.addTask {
-                    let session = self.session
-                    while Self.seconds(clock.now - start) < downloadSeconds, !Task.isCancelled {
-                        do {
-                            let (data, response) = try await session.data(from: url)
-                            if let http = response as? HTTPURLResponse, http.statusCode >= 400 { break }
-                            counter.add(data.count)
-                        } catch {
-                            break
-                        }
-                    }
-                }
-            }
+        let session = self.session
+        while Self.seconds(clock.now - start) < downloadSeconds, !Task.isCancelled {
+            do {
+                let (data, response) = try await session.data(from: url)
+                if let http = response as? HTTPURLResponse, http.statusCode >= 400 { break }
+                counter.add(data.count)
+            } catch { break }
         }
         sampler.cancel()
         return try Self.throughput(totalBytes: counter.bytes, snapshot: snapshot, start: start, clock: clock)
@@ -241,22 +210,12 @@ struct CloudflareSpeedEngine: Sendable {
         let start = clock.now
         let sampler = liveSampler(counter: counter, snapshot: snapshot, start: start, clock: clock, live: live)
 
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<parallelStreams {
-                let request = request
-                let payload = payload
-                group.addTask {
-                    let session = self.session
-                    while Self.seconds(clock.now - start) < uploadSeconds, !Task.isCancelled {
-                        do {
-                            _ = try await session.upload(for: request, from: payload)
-                            counter.add(payload.count)
-                        } catch {
-                            break
-                        }
-                    }
-                }
-            }
+        let session = self.session
+        while Self.seconds(clock.now - start) < uploadSeconds, !Task.isCancelled {
+            do {
+                _ = try await session.upload(for: request, from: payload)
+                counter.add(payload.count)
+            } catch { break }
         }
         sampler.cancel()
         return try Self.throughput(totalBytes: counter.bytes, snapshot: snapshot, start: start, clock: clock)
