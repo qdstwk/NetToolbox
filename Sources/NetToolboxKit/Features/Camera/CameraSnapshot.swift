@@ -13,20 +13,30 @@ struct SnapshotFetcher: Sendable {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
 
-        var (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
-            let challenge = http.value(forHTTPHeaderField: "WWW-Authenticate") ?? ""
-            if let authorization = authorization(for: challenge, method: "GET", url: url) {
-                request.setValue(authorization, forHTTPHeaderField: "Authorization")
-                (data, response) = try await URLSession.shared.data(for: request)
+        let session = URLSession(configuration: .ephemeral)
+        await UnifiedNetworkInterface.registerCancellation(for: lease) {
+            session.invalidateAndCancel()
+        }
+        do {
+            var (data, response) = try await session.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+                let challenge = http.value(forHTTPHeaderField: "WWW-Authenticate") ?? ""
+                if let authorization = authorization(for: challenge, method: "GET", url: url) {
+                    request.setValue(authorization, forHTTPHeaderField: "Authorization")
+                    (data, response) = try await session.data(for: request)
+                }
             }
-        }
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), !data.isEmpty else {
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), !data.isEmpty else {
+                await UnifiedNetworkInterface.release(lease)
+                throw ONVIFError.unauthorized
+            }
             await UnifiedNetworkInterface.release(lease)
-            throw ONVIFError.unauthorized
+            return data
+        } catch {
+            await UnifiedNetworkInterface.release(lease)
+            throw error
         }
-        await UnifiedNetworkInterface.release(lease)
-        return data
+
     }
 
     private func authorization(for challenge: String, method: String, url: URL) -> String? {
