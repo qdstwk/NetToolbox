@@ -112,6 +112,7 @@ final class DNSReliabilityViewModel {
 
     private let resolver: any DNSResolving
     private let maxProbes = 200
+    private var currentCancellation: NetworkCancellationHandle?
 
     init(resolver: any DNSResolving = UDPDNSResolver()) {
         self.resolver = resolver
@@ -150,13 +151,21 @@ final class DNSReliabilityViewModel {
             return
         }
 
+        let cancellation = NetworkCancellationHandle()
+        currentCancellation = cancellation
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         let clock = ContinuousClock()
         while isRunning {
             let start = clock.now
             var latency: Double?
             var detail: String
             do {
-                let records = try await resolver.resolve(name: name, type: type, server: server)
+                let records: [DNSRecord]
+                if let udp = resolver as? UDPDNSResolver {
+                    records = try await udp.resolve(name: name, type: type, server: server, cancellation: cancellation)
+                } else {
+                    records = try await resolver.resolve(name: name, type: type, server: server)
+                }
                 latency = start.duration(to: clock.now).milliseconds
                 detail = records.first?.value ?? L10nString("dnsrel.norecords")
             } catch {
@@ -169,10 +178,14 @@ final class DNSReliabilityViewModel {
             guard isRunning else { break }
             try? await Task.sleep(for: .seconds(interval))
         }
+        currentCancellation = nil
         await UnifiedNetworkInterface.release(lease)
     }
 
-    func stop() { isRunning = false }
+    func stop() {
+        currentCancellation?.cancel()
+        isRunning = false
+    }
 
     func clear() {
         probes = []
