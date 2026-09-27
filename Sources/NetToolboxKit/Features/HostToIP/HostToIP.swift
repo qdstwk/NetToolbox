@@ -4,53 +4,6 @@ import Observation
 import Darwin
 #endif
 
-/// Resolves a hostname to its IPv4 and IPv6 addresses via `getaddrinfo`.
-/// No permission required (public DNS resolution).
-protocol HostResolving: Sendable {
-    func resolve(_ host: String) async -> [String]
-}
-
-struct SystemHostResolver: HostResolving {
-    func resolve(_ host: String) async -> [String] {
-        await withCheckedContinuation { continuation in
-            let shot = OneShot(continuation)
-            DispatchQueue.global(qos: .userInitiated).async {
-                shot.resume(Self.blockingResolve(host))
-            }
-        }
-    }
-
-    #if canImport(Darwin)
-    private static func blockingResolve(_ host: String) -> [String] {
-        var hints = addrinfo(
-            ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM,
-            ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil
-        )
-        var result: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, nil, &hints, &result) == 0, let first = result else {
-            return []
-        }
-        defer { freeaddrinfo(result) }
-
-        var addresses: [String] = []
-        for pointer in sequence(first: first, next: { $0.pointee.ai_next }) {
-            guard let sa = pointer.pointee.ai_addr else { continue }
-            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            if getnameinfo(
-                sa, socklen_t(pointer.pointee.ai_addrlen),
-                &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST
-            ) == 0 {
-                let address = String(cBuffer: buffer)
-                if !addresses.contains(address) { addresses.append(address) }
-            }
-        }
-        return addresses
-    }
-    #else
-    private static func blockingResolve(_ host: String) -> [String] { [] }
-    #endif
-}
-
 @MainActor
 @Observable
 final class HostToIPViewModel {
@@ -63,12 +16,6 @@ final class HostToIPViewModel {
     var host = ""
     private(set) var output: Output = .idle
 
-    private let resolver: any HostResolving
-
-    init(resolver: any HostResolving = SystemHostResolver()) {
-        self.resolver = resolver
-    }
-
     func resolve() async {
         let trimmed = host.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { output = .idle; return }
@@ -76,7 +23,12 @@ final class HostToIPViewModel {
         let lease: UnifiedNetworkInterface.Lease
         do { lease = try await UnifiedNetworkInterface.claim(operation: "host-resolve", target: trimmed) }
         catch { output = .failure; return }
-        let addresses = await resolver.resolve(trimmed)
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
+        let dns = UDPDNSResolver()
+        let a = (try? await dns.resolve(name: trimmed, type: .a, server: "1.1.1.1", cancellation: cancellation)) ?? []
+        let aaaa = cancellation.isCancelled ? [] : ((try? await dns.resolve(name: trimmed, type: .aaaa, server: "1.1.1.1", cancellation: cancellation)) ?? [])
+        let addresses = (a + aaaa).map(\.value)
         await UnifiedNetworkInterface.release(lease)
         output = addresses.isEmpty ? .failure : .success(addresses)
     }
