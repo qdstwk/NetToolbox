@@ -66,7 +66,8 @@ enum TCPProbe {
     /// Attempts a TCP handshake and returns how long it took to reach
     /// `.ready`. A refused/unreachable port resolves to a failure.
     static func connectLatency(
-        host: String, port: UInt16, timeout: Double
+        host: String, port: UInt16, timeout: Double,
+        cancellation: NetworkCancellationHandle? = nil
     ) async -> Result<Duration, NetProbeError> {
         await withCheckedContinuation { continuation in
             let shot = OneShot(continuation)
@@ -86,17 +87,25 @@ enum TCPProbe {
             let queue = DispatchQueue(label: "net.probe.tcp")
             let clock = ContinuousClock()
             let start = clock.now
+            cancellation?.install {
+                connection.cancel()
+                shot.resume(.failure(.cancelled))
+            }
+            if cancellation?.isCancelled == true { return }
 
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
+                    cancellation?.clear()
                     let elapsed = start.duration(to: clock.now)
                     connection.cancel()
                     shot.resume(.success(elapsed))
                 case .failed(let error):
+                    cancellation?.clear()
                     connection.cancel()
                     shot.resume(.failure(.connection(error.localizedDescription)))
                 case .waiting(let error):
+                    cancellation?.clear()
                     // A probe should not wait for connectivity: treat a
                     // refused/unreachable endpoint as a definitive failure.
                     connection.cancel()
@@ -107,6 +116,7 @@ enum TCPProbe {
             }
             connection.start(queue: queue)
             queue.asyncAfter(deadline: .now() + timeout) {
+                cancellation?.clear()
                 connection.cancel()
                 shot.resume(.failure(.timeout))
             }
