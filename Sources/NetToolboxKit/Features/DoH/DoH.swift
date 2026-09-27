@@ -5,6 +5,16 @@ import Observation
 /// decodes the wire-format answer with the shared `DNSMessage` codec.
 struct DoHResolver {
     func resolve(name: String, type: DNSRecordType, server: String) async throws -> [DNSRecord] {
+        let host = server.trimmingCharacters(in: .whitespaces)
+        let lease = try await UnifiedNetworkInterface.claim(operation: "doh", target: host)
+        return try await resolve(name: name, type: type, server: server, lease: lease, ownsLease: true)
+    }
+
+    func resolve(name: String, type: DNSRecordType, server: String, lease: UnifiedNetworkInterface.Lease) async throws -> [DNSRecord] {
+        try await resolve(name: name, type: type, server: server, lease: lease, ownsLease: false)
+    }
+
+    private func resolve(name: String, type: DNSRecordType, server: String, lease: UnifiedNetworkInterface.Lease, ownsLease: Bool) async throws -> [DNSRecord] {
         let query = try DNSMessage.encodeQuery(name: name, type: type, id: 0)
         let host = server.trimmingCharacters(in: .whitespaces)
         guard let url = URL(string: "https://\(host)/dns-query") else {
@@ -17,7 +27,6 @@ struct DoHResolver {
         request.setValue("application/dns-message", forHTTPHeaderField: "accept")
         request.httpBody = query
 
-        let lease = try await UnifiedNetworkInterface.claim(operation: "doh", target: host)
         let session = URLSession(configuration: .ephemeral)
         await UnifiedNetworkInterface.registerCancellation(for: lease) { session.invalidateAndCancel() }
         do {
@@ -26,13 +35,13 @@ struct DoHResolver {
                 throw NetworkServiceError.badStatus(http.statusCode)
             }
             let records = try DNSMessage.decodeAnswers(data)
-            await UnifiedNetworkInterface.release(lease)
+            if ownsLease { await UnifiedNetworkInterface.release(lease) }
             return records
         } catch let error as URLError where error.code == .notConnectedToInternet {
-            await UnifiedNetworkInterface.release(lease)
+            if ownsLease { await UnifiedNetworkInterface.release(lease) }
             throw NetworkServiceError.offline
         } catch {
-            await UnifiedNetworkInterface.release(lease)
+            if ownsLease { await UnifiedNetworkInterface.release(lease) }
             throw error
         }
     }
