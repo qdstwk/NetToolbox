@@ -63,24 +63,22 @@ final class CertExpiryViewModel {
         isChecking = true
         let inspector = self.inspector
         let targets = hosts
-        let checked = await withTaskGroup(of: CertExpiryResult.self) { group in
-            for host in targets {
-                group.addTask {
-                    var result = CertExpiryResult(host: host)
-                    switch await inspector.inspect(host: host, port: 443) {
-                    case .success(let info):
-                        result.daysRemaining = info.daysRemaining
-                        result.notAfter = info.notAfter
-                        result.subject = info.subject
-                    case .failure(let error):
-                        result.error = error.localizedDescription
-                    }
-                    return result
-                }
+        var checked: [CertExpiryResult] = []
+        for host in targets {
+            var result = CertExpiryResult(host: host)
+            let lease: UnifiedNetworkInterface.Lease
+            do { lease = try await UnifiedNetworkInterface.claim(operation: "cert-expiry", target: host) }
+            catch { result.error = error.localizedDescription; checked.append(result); continue }
+            switch await inspector.inspect(host: host, port: 443) {
+            case .success(let info):
+                result.daysRemaining = info.daysRemaining
+                result.notAfter = info.notAfter
+                result.subject = info.subject
+            case .failure(let error):
+                result.error = error.localizedDescription
             }
-            var out: [CertExpiryResult] = []
-            for await result in group { out.append(result) }
-            return out
+            await UnifiedNetworkInterface.release(lease)
+            checked.append(result)
         }
         results = targets.compactMap { host in checked.first { $0.host == host } }
         isChecking = false
