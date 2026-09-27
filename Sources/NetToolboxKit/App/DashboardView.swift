@@ -40,7 +40,6 @@ struct DashboardView: View {
         .background(theme.background)
         .navigationTitle(Text(L10n("app.title")))
         .navigationBarTitleDisplayMode(.large)
-        .task { await loadIP() }
     }
 
     // MARK: Header
