@@ -19,16 +19,16 @@ struct TFTPClient: Sendable {
         return bytes
     }
 
-    func download(host: String, port: UInt16, filename: String, maxBytes: Int) async -> Result<Data, EngineError> {
+    func download(host: String, port: UInt16, filename: String, maxBytes: Int, cancellation: NetworkCancellationHandle) async -> Result<Data, EngineError> {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: Self.transfer(host: host, port: port, filename: filename, maxBytes: maxBytes))
+                continuation.resume(returning: Self.transfer(host: host, port: port, filename: filename, maxBytes: maxBytes, cancellation: cancellation))
             }
         }
     }
 
     #if canImport(Darwin)
-    private static func transfer(host: String, port: UInt16, filename: String, maxBytes: Int) -> Result<Data, EngineError> {
+    private static func transfer(host: String, port: UInt16, filename: String, maxBytes: Int, cancellation: NetworkCancellationHandle) -> Result<Data, EngineError> {
         var hints = addrinfo()
         hints.ai_family = AF_INET
         hints.ai_socktype = SOCK_DGRAM
@@ -37,6 +37,7 @@ struct TFTPClient: Sendable {
             return .failure(EngineError(L10nString("tftp.error.resolve")))
         }
         defer { freeaddrinfo(info) }
+        if cancellation.isCancelled { return .failure(EngineError("Cancelled")) }
 
         var serverAddr = sockaddr_storage()
         memcpy(&serverAddr, info.pointee.ai_addr, Int(info.pointee.ai_addrlen))
@@ -44,10 +45,12 @@ struct TFTPClient: Sendable {
 
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { return .failure(EngineError(L10nString("tftp.error.socket"))) }
-        defer { close(fd) }
+        let socketOwner = TFTPClosableSocket(fd)
+        defer { socketOwner.closeIfOpen(); cancellation.clear() }
         var tv = timeval(tv_sec: 5, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
+        if cancellation.isCancelled { return .failure(EngineError("Cancelled")) }
         let rrq = rrqPacket(filename: filename)
         let sent = rrq.withUnsafeBytes { raw in
             withUnsafePointer(to: &serverAddr) { ptr in
@@ -57,6 +60,8 @@ struct TFTPClient: Sendable {
             }
         }
         guard sent >= 0 else { return .failure(EngineError(L10nString("tftp.error.socket"))) }
+        cancellation.install { socketOwner.cancel() }
+        if cancellation.isCancelled { return .failure(EngineError("Cancelled")) }
 
         var data = Data()
         var expected: UInt16 = 1
@@ -64,6 +69,7 @@ struct TFTPClient: Sendable {
         var fromAddr = sockaddr_storage()
 
         while true {
+            if cancellation.isCancelled { return .failure(EngineError("Cancelled")) }
             var fromLen = socklen_t(MemoryLayout<sockaddr_storage>.size)
             let n = withUnsafeMutablePointer(to: &fromAddr) { ap in
                 ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
@@ -80,6 +86,7 @@ struct TFTPClient: Sendable {
             }
             if opcode != 3 { continue } // only DATA
 
+            if cancellation.isCancelled { return .failure(EngineError("Cancelled")) }
             // ACK back to the transfer-ID address the DATA came from.
             let ack: [UInt8] = [0x00, 0x04, buffer[2], buffer[3]]
             _ = ack.withUnsafeBytes { raw in
@@ -100,9 +107,22 @@ struct TFTPClient: Sendable {
             }
         }
     }
+    private final class TFTPClosableSocket: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fd: Int32?
+        init(_ fd: Int32) { self.fd = fd }
+        func cancel() {
+            lock.lock()
+            let value = fd
+            fd = nil
+            lock.unlock()
+            if let value { close(value) }
+        }
+        func closeIfOpen() { cancel() }
+    }
     #else
-    private static func transfer(host: String, port: UInt16, filename: String, maxBytes: Int) -> Result<Data, EngineError> {
-        .failure("Unsupported platform")
+    private static func transfer(host: String, port: UInt16, filename: String, maxBytes: Int, cancellation: NetworkCancellationHandle) -> Result<Data, EngineError> {
+        .failure(EngineError("Unsupported platform"))
     }
     #endif
 }
@@ -139,7 +159,9 @@ final class TFTPViewModel {
             isRunning = false
             return
         }
-        let result = await client.download(host: target, port: port, filename: name, maxBytes: 2_000_000)
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
+        let result = await client.download(host: target, port: port, filename: name, maxBytes: 2_000_000, cancellation: cancellation)
         switch result {
         case .success(let data):
             byteCount = data.count
