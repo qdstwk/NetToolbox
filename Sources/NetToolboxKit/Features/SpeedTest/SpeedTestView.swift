@@ -38,6 +38,15 @@ final class SpeedTestViewModel {
         reset()
         phase = .latency
         activity?.start(toolID)
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "speed-test", target: "speed-test-service")
+        } catch {
+            phase = .failed(error.localizedDescription)
+            errorMessage = error.localizedDescription
+            activity?.stop(toolID)
+            return
+        }
         do {
             for try await update in engine.stream() {
                 apply(update)
@@ -51,6 +60,7 @@ final class SpeedTestViewModel {
         if phase == .finished, download > 0 || upload > 0 {
             history?.add(download: download, upload: upload, latency: latency, jitter: jitter)
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
         activity?.stop(toolID)
     }
 
