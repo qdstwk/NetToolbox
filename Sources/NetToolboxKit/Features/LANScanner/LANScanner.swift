@@ -178,8 +178,10 @@ final class LANScannerViewModel {
     /// ICMP + TCP-connect sweep of the given hosts, concurrency-limited.
     private nonisolated static func sweep(_ hosts: [String], cancellation: NetworkCancellationHandle) async -> [HostResult] {
         var results: [HostResult] = []
+        let clock = ContinuousClock()
+        let start = clock.now
         for ip in hosts {
-            if Task.isCancelled { break }
+            if Task.isCancelled || cancellation.isCancelled || start.duration(to: clock.now) >= UnifiedNetworkInterface.Deadline.scan { break }
             var rtt = await ICMPHostPinger.probe(ip: ip, timeout: 0.9, cancellation: cancellation)
             if rtt == nil {
                 rtt = await TCPHostProbe.probe(ip: ip, timeout: 0.9, cancellation: cancellation)
