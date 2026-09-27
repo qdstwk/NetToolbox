@@ -83,9 +83,10 @@ final class PingViewModel {
             let firstType: DNSRecordType = preferIPv6 ? .aaaa : .a
             let secondType: DNSRecordType = preferIPv6 ? .a : .aaaa
             let first = (try? await dns.resolve(name: target, type: firstType, server: "1.1.1.1", cancellation: cancellation)) ?? []
-            let second = first.isEmpty && !cancellation.isCancelled
-                ? ((try? await dns.resolve(name: target, type: secondType, server: "1.1.1.1", cancellation: cancellation)) ?? [])
-                : []
+            var second: [DNSRecord] = []
+            if first.isEmpty && !cancellation.isCancelled {
+                second = (try? await dns.resolve(name: target, type: secondType, server: "1.1.1.1", cancellation: cancellation)) ?? []
+            }
             if let value = (first.first ?? second.first)?.value {
                 resolved = .init(ip: value, isIPv6: value.contains(":"))
             } else {
