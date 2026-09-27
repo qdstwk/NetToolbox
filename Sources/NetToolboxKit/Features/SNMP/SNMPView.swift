@@ -98,19 +98,25 @@ final class SNMPViewModel {
         let target = host.trimmingCharacters(in: .whitespaces)
         guard !target.isEmpty else { output = .idle; return }
         let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) ?? 161
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "snmp", target: target) }
+        catch { output = .failure(error.localizedDescription); return }
         let oid = oid.trimmingCharacters(in: .whitespaces)
         output = .loading
         do {
             if version == .v3 {
                 let user = username.trimmingCharacters(in: .whitespaces)
                 guard !user.isEmpty, !authPassword.isEmpty else {
-                    output = .failure(L10nString("snmp.v3.needCredentials")); return
+                    output = .failure(L10nString("snmp.v3.needCredentials"))
+                    await UnifiedNetworkInterface.release(lease)
+                    return
                 }
                 let varbind = try await v3Service.get(
                     host: target, port: port, user: user,
                     password: authPassword, auth: authProtocol, oid: oid
                 )
                 output = .get(varbind)
+                await UnifiedNetworkInterface.release(lease)
                 return
             }
             let community = community.trimmingCharacters(in: .whitespaces)
@@ -123,6 +129,7 @@ final class SNMPViewModel {
         } catch {
             output = .failure(error.localizedDescription)
         }
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
