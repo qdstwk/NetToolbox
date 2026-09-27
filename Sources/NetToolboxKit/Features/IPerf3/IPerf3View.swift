@@ -76,7 +76,7 @@ final class IPerf3ViewModel {
         case .failed(let message):
             phase = .failed(message)
             client = nil
-            releaseLease()
+            Task { await releaseLease() }
         }
     }
 
@@ -170,6 +170,7 @@ struct IPerf3View: View {
                     Text(L10n("iperf3.input.parallel"))
                         .font(AppTypography.caption).foregroundStyle(theme.textSecondary)
                     TextField("1", text: $viewModel.parallelText)
+                        .disabled(true)
                         .textFieldStyle(.roundedBorder)
                         .font(AppTypography.monoBody)
                         .keyboardType(.numberPad)
