@@ -79,9 +79,9 @@ final class HTTPHeadersViewModel {
         let trimmed = urlString.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { output = .idle; return }
         output = .loading
-        let lease: GlobalNetworkOperationGate.Lease
+        let lease: UnifiedNetworkInterface.Lease
         do {
-            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "http-headers", target: trimmed)
+            lease = try await UnifiedNetworkInterface.claim(operation: "http-headers", target: trimmed)
         } catch {
             output = .failure(error.localizedDescription)
             return
@@ -91,7 +91,7 @@ final class HTTPHeadersViewModel {
         } catch {
             output = .failure(error.localizedDescription)
         }
-        await GlobalNetworkOperationGate.shared.release(lease)
+        await UnifiedNetworkInterface.release(lease)
     }
 }
 
