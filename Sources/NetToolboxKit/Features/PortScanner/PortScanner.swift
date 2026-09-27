@@ -18,25 +18,17 @@ protocol PortScanning: Sendable {
 
 struct TCPPortScanner: PortScanning {
     func scan(host: String, ports: [UInt16], timeout: Double) async -> [PortScanResult] {
-        await withTaskGroup(of: PortScanResult.self) { group in
-            let semaphore = ConcurrencyLimiter(limit: 16)
-            for port in ports {
-                group.addTask {
-                    await semaphore.acquire()
-                    defer { Task { await semaphore.release() } }
-                    let result = await TCPProbe.connectLatency(host: host, port: port, timeout: timeout)
-                    let isOpen = (try? result.get()) != nil
-                    return PortScanResult(
-                        port: port,
-                        state: isOpen ? .open : .closed,
-                        service: PortDatabase.serviceName(for: Int(port))
-                    )
-                }
-            }
-            var results: [PortScanResult] = []
-            for await result in group { results.append(result) }
-            return results.sorted { $0.port < $1.port }
+        var results: [PortScanResult] = []
+        for port in ports.sorted() {
+            let result = await TCPProbe.connectLatency(host: host, port: port, timeout: timeout)
+            let isOpen = (try? result.get()) != nil
+            results.append(PortScanResult(
+                port: port,
+                state: isOpen ? .open : .closed,
+                service: PortDatabase.serviceName(for: Int(port))
+            ))
         }
+        return results
     }
 }
 
@@ -143,29 +135,27 @@ final class PortScannerViewModel {
         scannedCount = 0
         totalCount = targetPorts.count
 
-        await withTaskGroup(of: PortScanResult?.self) { group in
-            let limiter = ConcurrencyLimiter(limit: 24)
-            for port in targetPorts {
-                group.addTask {
-                    await limiter.acquire()
-                    defer { Task { await limiter.release() } }
-                    let result = await TCPProbe.connectLatency(host: target, port: port, timeout: 1.5)
-                    guard (try? result.get()) != nil else { return nil }
-                    return PortScanResult(
-                        port: port, state: .open,
-                        service: PortDatabase.serviceName(for: Int(port))
-                    )
-                }
-            }
-            for await result in group {
-                scannedCount += 1
-                if let result {
-                    results.append(result)
-                    results.sort { $0.port < $1.port }
-                }
-                if !isScanning { break }
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "port-scan", target: target)
+        } catch {
+            errorMessage = error.localizedDescription
+            isScanning = false
+            return
+        }
+
+        for port in targetPorts {
+            guard isScanning else { break }
+            let probe = await TCPProbe.connectLatency(host: target, port: port, timeout: 1.5)
+            scannedCount += 1
+            if (try? probe.get()) != nil {
+                results.append(PortScanResult(
+                    port: port, state: .open,
+                    service: PortDatabase.serviceName(for: Int(port))
+                ))
             }
         }
+        await GlobalNetworkOperationGate.shared.release(lease)
         isScanning = false
         history.insert("\(target) — \(results.count) open / \(totalCount)", at: 0)
         if history.count > 10 { history.removeLast() }
