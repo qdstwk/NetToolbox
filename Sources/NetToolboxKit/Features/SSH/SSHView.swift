@@ -40,6 +40,7 @@ final class SSHViewModel {
     var toolID = ""
     private var shellClient: SSHClient?
     private var readTask: Task<Void, Never>?
+    private var shellNetworkLease: GlobalNetworkOperationGate.Lease?
 
     private func makeAuth() -> SSHAuth? {
         if useKey {
@@ -93,6 +94,15 @@ final class SSHViewModel {
         result = nil
         hostKeyTrust = nil
         guard let (client, auth) = makeClient() else { return }
+        let target = host.trimmingCharacters(in: .whitespaces)
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "ssh-exec", target: target)
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+        defer { Task { await GlobalNetworkOperationGate.shared.release(lease) } }
         isRunning = true
         let user = username.trimmingCharacters(in: .whitespaces)
         let command = self.command
@@ -114,15 +124,25 @@ final class SSHViewModel {
         shellLines = []
         hostKeyTrust = nil
         guard let (client, auth) = makeClient() else { return }
+        let target = host.trimmingCharacters(in: .whitespaces)
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "ssh-shell", target: target)
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
         isRunning = true
         let user = username.trimmingCharacters(in: .whitespaces)
         do {
             try await client.openShell(username: user, auth: auth, timeout: 12)
             evaluateTrust(fingerprint: client.fingerprint)
             shellClient = client
+            shellNetworkLease = lease
             shellConnected = true
             startReading(client)
         } catch {
+            await GlobalNetworkOperationGate.shared.release(lease)
             errorMessage = error.localizedDescription + "\n\(client.diagnostics) · stage=\(client.stage)"
         }
         isRunning = false
@@ -138,7 +158,13 @@ final class SSHViewModel {
                     break
                 }
             }
-            await MainActor.run { self?.shellConnected = false }
+            let lease = await MainActor.run { () -> GlobalNetworkOperationGate.Lease? in
+                let lease = self?.shellNetworkLease
+                self?.shellNetworkLease = nil
+                self?.shellConnected = false
+                return lease
+            }
+            if let lease { await GlobalNetworkOperationGate.shared.release(lease) }
         }
     }
 
@@ -159,6 +185,10 @@ final class SSHViewModel {
         readTask = nil
         shellClient?.close()
         shellClient = nil
+        if let lease = shellNetworkLease {
+            shellNetworkLease = nil
+            Task { await GlobalNetworkOperationGate.shared.release(lease) }
+        }
         shellConnected = false
     }
 }
