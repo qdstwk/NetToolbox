@@ -32,11 +32,15 @@ final class MQTTViewModel {
     var toolID = ""
 
     private var client: MQTTClient?
+    private var networkLease: UnifiedNetworkInterface.Lease?
 
-    func connect() {
+    func connect() async {
         let trimmedHost = host.trimmingCharacters(in: .whitespaces)
         guard !trimmedHost.isEmpty else { return }
         let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) ?? 1883
+        let lease: UnifiedNetworkInterface.Lease
+        do { lease = try await UnifiedNetworkInterface.claim(operation: "mqtt", target: trimmedHost) }
+        catch { append(.error, error.localizedDescription); return }
         let identifier = clientID.trimmingCharacters(in: .whitespaces).isEmpty
             ? "nettoolbox-\(String(format: "%06x", UInt32.random(in: 0...0xFFFFFF)))"
             : clientID
@@ -51,6 +55,8 @@ final class MQTTViewModel {
             }
         }
         self.client = client
+        networkLease = lease
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { client.disconnect() }
         append(.system, L10nString("mqtt.status.connecting"))
         client.connect()
     }
@@ -73,6 +79,10 @@ final class MQTTViewModel {
 
     func disconnect() {
         client?.disconnect()
+        if let lease = networkLease {
+            networkLease = nil
+            Task { await UnifiedNetworkInterface.release(lease) }
+        }
     }
 
     func clear() {
@@ -90,11 +100,19 @@ final class MQTTViewModel {
             append(.message, "\(topic) ▸ \(payload)")
         case .disconnected:
             isConnected = false
+            releaseLease()
             append(.system, L10nString("mqtt.status.disconnected"))
         case .error(let message):
             isConnected = false
+            releaseLease()
             append(.error, message)
         }
+    }
+
+    private func releaseLease() {
+        guard let lease = networkLease else { return }
+        networkLease = nil
+        Task { await UnifiedNetworkInterface.release(lease) }
     }
 
     private func append(_ kind: Entry.Kind, _ text: String) {
@@ -212,7 +230,7 @@ struct MQTTView: View {
                 .buttonStyle(.bordered)
             } else {
                 Button {
-                    viewModel.connect()
+                    Task { await viewModel.connect() }
                 } label: {
                     Label(L10nString("mqtt.action.connect"), systemImage: "bolt.horizontal")
                         .font(AppTypography.headline)
