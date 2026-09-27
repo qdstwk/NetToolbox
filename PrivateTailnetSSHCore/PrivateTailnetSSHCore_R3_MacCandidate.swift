@@ -572,12 +572,14 @@ struct IntegratedSSHGCMCipher {
     private let key: SymmetricKey
     private let fixed: Data           // 4 bytes
     private var counter: UInt64       // 8-byte invocation counter
+    private var exhausted = false
 
 // [ANNOTATION] 初始化仅建立当前类型所需状态；所有 guard/默认值均属于冻结 R3 的原始安全或协议行为。
     init(key: Data, iv: Data) {
         self.key = SymmetricKey(data: key)
         self.fixed = iv.prefix(4)
         self.counter = iv.dropFirst(4).prefix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        self.exhausted = false
     }
 
 // [ANNOTATION] 按 OpenSSH AES-GCM 约定推进 64 位 invocation counter；禁止溢出回绕以避免 nonce 重用。
@@ -593,10 +595,12 @@ struct IntegratedSSHGCMCipher {
         return nonce
     }
 
-    private mutating func advanceNonceAfterSuccess() throws {
-        // 禁止成功使用最后一个 nonce 后回绕到 0；当前连接必须终止/重新协商。
-        guard counter != UInt64.max else { throw SSHError.encryptFailed }
-        counter += 1
+    private mutating func advanceNonceAfterSuccess() {
+        if counter == UInt64.max {
+            exhausted = true
+        } else {
+            counter += 1
+        }
     }
 
     /// Seals `plaintext` (padding_length || payload || padding) with the
@@ -607,8 +611,8 @@ struct IntegratedSSHGCMCipher {
               let nonce = try? AES.GCM.Nonce(data: nonceData),
               let box = try? AES.GCM.seal(
                 plaintext, using: key, nonce: nonce, authenticating: lengthField
-              ),
-              (try? advanceNonceAfterSuccess()) != nil else { return nil }
+              ) else { return nil }
+        advanceNonceAfterSuccess()
         return box.ciphertext + box.tag
     }
 
@@ -620,8 +624,8 @@ struct IntegratedSSHGCMCipher {
               let box = try? AES.GCM.SealedBox(
                 nonce: nonce, ciphertext: ciphertext, tag: tag
               ),
-              let plaintext = try? AES.GCM.open(box, using: key, authenticating: lengthField),
-              (try? advanceNonceAfterSuccess()) != nil else { return nil }
+              let plaintext = try? AES.GCM.open(box, using: key, authenticating: lengthField) else { return nil }
+        advanceNonceAfterSuccess()
         return plaintext
     }
 }
@@ -643,6 +647,13 @@ private actor SSHSendGate {
         if waiters.isEmpty { busy = false }
         else { waiters.removeFirst().resume() }
     }
+}
+
+private final class SSHHandshakeTimeoutState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var timedOut = false
+    func markTimedOut() { lock.lock(); timedOut = true; lock.unlock() }
+    var didTimeOut: Bool { lock.lock(); defer { lock.unlock() }; return timedOut }
 }
 
 private actor SSHReceiveGate {
@@ -814,12 +825,12 @@ final class IntegratedSSHClient: @unchecked Sendable {
         // Network.framework 的 pending receive 立即退出，因此 watchdog 到期时直接
         // cancel 底层 NWConnection；这会打断 readLine/readExact/expect/authenticate。
         let handshakeDeadline = max(timeout, 1.0)
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(handshakeDeadline))
+        let timeoutState = SSHHandshakeTimeoutState()
         let watchdog = Task { [connection] in
             do {
                 try await Task.sleep(for: .seconds(handshakeDeadline))
                 guard !Task.isCancelled else { return }
+                timeoutState.markTimedOut()
                 connection.cancel()
             } catch {
                 // establish 正常结束时 watchdog 被 cancel；无需做任何事。
@@ -830,10 +841,10 @@ final class IntegratedSSHClient: @unchecked Sendable {
         do {
             try await establishAfterTCPReady(username: username, auth: auth)
         } catch {
-            if clock.now >= deadline { throw SSHError.handshakeTimeout }
+            if timeoutState.didTimeOut { throw SSHError.handshakeTimeout }
             throw error
         }
-        if clock.now >= deadline { throw SSHError.handshakeTimeout }
+        if timeoutState.didTimeOut { throw SSHError.handshakeTimeout }
     }
 
     // TCP 已经 READY；本函数中的所有网络等待均受 establish() 的 watchdog 约束。
@@ -1182,7 +1193,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
     private func sendPacket(_ payload: Data) async throws {
         // 多个 UI/reader task 即使同时要求发送，也必须严格串行；GCM nonce 每包只能消费一次。
         await sendGate.enter()
-        defer { Task { await sendGate.leave() } }
+        do {
         if var cipher = encrypt {
             var pad = 16 - ((1 + payload.count) % 16)
             if pad < 4 { pad += 16 }
@@ -1208,6 +1219,11 @@ final class IntegratedSSHClient: @unchecked Sendable {
             packet.append(payload)
             packet.append(try randomBytes(pad))
             try await writeRaw(packet)
+        }
+        await sendGate.leave()
+        } catch {
+            await sendGate.leave()
+            throw error
         }
     }
 
@@ -1248,8 +1264,14 @@ final class IntegratedSSHClient: @unchecked Sendable {
 // [ANNOTATION] 过滤 SSH transport housekeeping 消息；DISCONNECT 转成错误，IGNORE/DEBUG 跳过，GLOBAL_REQUEST 按 want-reply 必要时回复 failure。
     private func nextPayload() async throws -> Data {
         guard await receiveGate.claim() else { throw SSHError.concurrentReceive }
-        defer { Task { await receiveGate.release() } }
-        return try await nextPayloadUnlocked()
+        do {
+            let payload = try await nextPayloadUnlocked()
+            await receiveGate.release()
+            return payload
+        } catch {
+            await receiveGate.release()
+            throw error
+        }
     }
 
     // 仅允许 nextPayload() 在持有 receiveGate 时调用。
