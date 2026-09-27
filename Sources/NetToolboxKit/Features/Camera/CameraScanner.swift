@@ -26,9 +26,12 @@ struct CameraScanner: Sendable {
         } catch {
             return []
         }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         var found: [String] = []
         for host in 1...254 {
-            if let ip = await Self.probe(base: base, host: host, port: port, timeout: timeout) {
+            if cancellation.isCancelled { break }
+            if let ip = await Self.probe(base: base, host: host, port: port, timeout: timeout, cancellation: cancellation) {
                 found.append(ip)
             }
         }
@@ -36,9 +39,9 @@ struct CameraScanner: Sendable {
         return found.sorted { lastOctet($0) < lastOctet($1) }
     }
 
-    private static func probe(base: String, host: Int, port: UInt16, timeout: Double) async -> String? {
+    private static func probe(base: String, host: Int, port: UInt16, timeout: Double, cancellation: NetworkCancellationHandle) async -> String? {
         let ip = "\(base)\(host)"
-        if case .success = await TCPProbe.connectLatency(host: ip, port: port, timeout: timeout) {
+        if case .success = await TCPProbe.connectLatency(host: ip, port: port, timeout: timeout, cancellation: cancellation) {
             return ip
         }
         return nil
