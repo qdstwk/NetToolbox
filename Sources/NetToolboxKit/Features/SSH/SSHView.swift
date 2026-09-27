@@ -102,6 +102,7 @@ final class SSHViewModel {
             errorMessage = error.localizedDescription
             return
         }
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { client.close() }
         defer { Task { await UnifiedNetworkInterface.release(lease) } }
         isRunning = true
         let user = username.trimmingCharacters(in: .whitespaces)
@@ -139,6 +140,7 @@ final class SSHViewModel {
             evaluateTrust(fingerprint: client.fingerprint)
             shellClient = client
             shellNetworkLease = lease
+            await UnifiedNetworkInterface.registerCancellation(for: lease) { client.close() }
             shellConnected = true
             startReading(client)
         } catch {
