@@ -39,6 +39,7 @@ enum FTP {
 /// passive-mode data connection. Plaintext FTP only (SFTP needs SSH).
 final class FTPClient: @unchecked Sendable {
     private let control: TCPConnection
+    private var dataConnection: TCPConnection?
 
     init?(host: String, port: UInt16) {
         guard let control = TCPConnection(host: host, port: port) else { return nil }
@@ -66,6 +67,7 @@ final class FTPClient: @unchecked Sendable {
             control.cancel()
             return .failure(.passiveFailed)
         }
+        dataConnection = data
         if case .failure = await data.open(timeout: 8) {
             control.cancel()
             return .failure(.passiveFailed)
@@ -75,6 +77,7 @@ final class FTPClient: @unchecked Sendable {
         _ = await self.command(command)
         let listing = await data.receiveAll(timeout: 8)
         data.cancel()
+        dataConnection = nil
         _ = await readReply()                                   // 226 transfer complete
         control.cancel()
 
@@ -85,6 +88,12 @@ final class FTPClient: @unchecked Sendable {
         case .failure:
             return .success("")
         }
+    }
+
+    func cancel() {
+        control.cancel()
+        dataConnection?.cancel()
+        dataConnection = nil
     }
 
     private func readReply() async -> String {
@@ -131,6 +140,7 @@ final class FTPViewModel {
             output = .failure(String(localized: "error.probe.invalidHost", bundle: .module))
             return
         }
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { client.cancel() }
         output = .loading
         let result = await client.list(user: user, password: password, path: path.trimmingCharacters(in: .whitespaces))
         switch result {
