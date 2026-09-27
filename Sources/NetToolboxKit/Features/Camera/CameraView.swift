@@ -172,7 +172,7 @@ struct CameraView: View {
                 }
 
                 Button(role: .destructive) {
-                    Task { await viewModel.Task { await session.stop() } }
+                    Task { await viewModel.session.stop() }
                 } label: {
                     Image(systemName: "stop.fill")
                 }
@@ -330,7 +330,7 @@ struct CameraView: View {
                     }
                 }
                 Button(role: .destructive) {
-                    if viewModel.selectedID == camera.id { Task { await viewModel.Task { await session.stop() } } }
+                    if viewModel.selectedID == camera.id { Task { await viewModel.session.stop() } }
                     store.remove(camera)
                 } label: {
                     Label(L10nString("common.delete"), systemImage: "trash")
