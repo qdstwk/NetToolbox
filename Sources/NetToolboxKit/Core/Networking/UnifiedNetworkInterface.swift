@@ -145,7 +145,7 @@ enum UnifiedNetworkInterface {
         }
 
         func claim(operation: String, target: String) throws -> Lease {
-            guard foregroundActive, foregroundState.isActive else {
+            guard foregroundActive, UnifiedNetworkInterface.foregroundState.isActive else {
                 throw InterfaceError.foregroundRequired
             }
             if let active {
@@ -157,7 +157,7 @@ enum UnifiedNetworkInterface {
         }
 
         func registerCancellation(_ hook: Cancellation, for lease: Lease) -> Bool {
-            guard foregroundActive, foregroundState.isActive, active?.id == lease.id else {
+            guard foregroundActive, UnifiedNetworkInterface.foregroundState.isActive, active?.id == lease.id else {
                 hook.cancel()
                 return false
             }
