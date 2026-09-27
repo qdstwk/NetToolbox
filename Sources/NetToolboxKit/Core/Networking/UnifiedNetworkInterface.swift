@@ -99,31 +99,57 @@ enum UnifiedNetworkInterface {
     private final class CancellationBridge: @unchecked Sendable {
         private let lock = NSLock()
         private var foreground = false
-        private var current: (UUID, Cancellation)?
+        private var leaseID: UUID?
+        private var hooks: [Cancellation] = []
 
         func setForeground(_ value: Bool) {
             lock.lock()
             foreground = value
-            let hook = value ? nil : current?.1
-            if !value { current = nil }
+            let pending = value ? [] : hooks
+            if !value {
+                leaseID = nil
+                hooks = []
+            }
             lock.unlock()
-            hook?.cancel()
+            pending.forEach { $0.cancel() }
         }
 
-        func install(_ hook: Cancellation, leaseID: UUID) {
+        func beginLease(_ id: UUID) {
             lock.lock()
-            guard foreground else {
+            guard foreground else { lock.unlock(); return }
+            leaseID = id
+            hooks = []
+            lock.unlock()
+        }
+
+        func install(_ hook: Cancellation, leaseID requestedID: UUID) {
+            lock.lock()
+            guard foreground, leaseID == requestedID else {
                 lock.unlock()
                 hook.cancel()
                 return
             }
-            current = (leaseID, hook)
+            hooks.append(hook)
             lock.unlock()
         }
 
-        func clear(leaseID: UUID) {
+        func installForCurrentLease(_ hook: Cancellation) {
             lock.lock()
-            if current?.0 == leaseID { current = nil }
+            guard foreground, leaseID != nil else {
+                lock.unlock()
+                hook.cancel()
+                return
+            }
+            hooks.append(hook)
+            lock.unlock()
+        }
+
+        func clear(leaseID requestedID: UUID) {
+            lock.lock()
+            if leaseID == requestedID {
+                leaseID = nil
+                hooks = []
+            }
             lock.unlock()
         }
     }
@@ -188,7 +214,9 @@ enum UnifiedNetworkInterface {
 
     static func claim(operation: String, target: String) async throws -> Lease {
         guard foregroundState.isActive else { throw InterfaceError.foregroundRequired }
-        return try await admission.claim(operation: operation, target: canonicalTarget(target))
+        let lease = try await admission.claim(operation: operation, target: canonicalTarget(target))
+        cancellationBridge.beginLease(lease.id)
+        return lease
     }
 
     static func registerCancellation(
@@ -198,6 +226,10 @@ enum UnifiedNetworkInterface {
         let hook = Cancellation(cancel: cancel)
         let accepted = await admission.registerCancellation(hook, for: lease)
         if accepted { cancellationBridge.install(hook, leaseID: lease.id) }
+    }
+
+    static func registerTransportCancellation(_ cancel: @escaping @Sendable () -> Void) {
+        cancellationBridge.installForCurrentLease(Cancellation(cancel: cancel))
     }
 
     static func release(_ lease: Lease) async {
