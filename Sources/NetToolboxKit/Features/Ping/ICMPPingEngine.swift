@@ -75,7 +75,6 @@ enum ICMPPingEngine {
             guard fd >= 0 else { return fail() }
             let socketOwner = SocketOwner(fd)
             defer { socketOwner.closeIfOpen(); cancellation?.clear() }
-            cancellation?.install { socketOwner.cancel() }
             if cancellation?.isCancelled == true { return fail() }
 
             var hops = Int32(ttl)
@@ -97,6 +96,8 @@ enum ICMPPingEngine {
                 }
             }
             guard sent > 0 else { return fail() }
+            cancellation?.install { socketOwner.cancel() }
+            if cancellation?.isCancelled == true { return fail() }
 
             var response = [UInt8](repeating: 0, count: 1500)
             let received = recvfrom(fd, &response, response.count, 0, nil, nil)
@@ -111,7 +112,6 @@ enum ICMPPingEngine {
             guard fd >= 0 else { return fail() }
             let socketOwner = SocketOwner(fd)
             defer { socketOwner.closeIfOpen(); cancellation?.clear() }
-            cancellation?.install { socketOwner.cancel() }
             if cancellation?.isCancelled == true { return fail() }
 
             var ttlValue = Int32(ttl)
@@ -128,6 +128,8 @@ enum ICMPPingEngine {
                 }
             }
             guard sent > 0 else { return fail() }
+            cancellation?.install { socketOwner.cancel() }
+            if cancellation?.isCancelled == true { return fail() }
 
             var response = [UInt8](repeating: 0, count: 1500)
             let received = recvfrom(fd, &response, response.count, 0, nil, nil)
