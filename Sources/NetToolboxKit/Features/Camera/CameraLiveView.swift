@@ -49,7 +49,7 @@ final class CameraSession {
     }
 
     private func playExclusive(_ camera: CameraStore.Camera) async {
-        stop()
+        await stop()
         self.camera = camera
         phase = .connecting
         activity?.start(toolID)
@@ -84,7 +84,7 @@ final class CameraSession {
         client.start()
     }
 
-    func stop() {
+    func stop() async {
         if recorder.isRecording {
             Task { let url = await recorder.stop(); isRecording = false; lastRecordingURL = url }
         }
@@ -92,7 +92,7 @@ final class CameraSession {
         client = nil
         if let lease = networkLease {
             networkLease = nil
-            Task { await UnifiedNetworkInterface.release(lease) }
+            await UnifiedNetworkInterface.release(lease)
         }
         if isActive { phase = .stopped }
         activity?.stop(toolID)
@@ -124,20 +124,20 @@ final class CameraSession {
         case .playing:
             phase = .playing
         case .stopped:
-            releaseNetworkLease()
+            Task { await releaseNetworkLease() }
             if isActive { phase = .stopped }
             activity?.stop(toolID)
         case .failed(let message):
-            releaseNetworkLease()
+            Task { await releaseNetworkLease() }
             phase = .failed(message)
             activity?.stop(toolID)
         }
     }
 
-    private func releaseNetworkLease() {
+    private func releaseNetworkLease() async {
         guard let lease = networkLease else { return }
         networkLease = nil
-        Task { await UnifiedNetworkInterface.release(lease) }
+        await UnifiedNetworkInterface.release(lease)
     }
 
     private func enqueue(_ sample: CMSampleBuffer) {
