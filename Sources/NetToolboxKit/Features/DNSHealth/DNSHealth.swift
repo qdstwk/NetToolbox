@@ -78,11 +78,18 @@ final class DNSHealthViewModel {
             return
         }
 
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         for (index, entry) in DNSHealthEngine.resolvers.enumerated() {
             guard isRunning else { break }
             var result = DNSResolverResult(name: entry.name, server: entry.ip)
             do {
-                let records = try await resolver.resolve(name: host, type: type, server: entry.ip)
+                let records: [DNSRecord]
+                if let udp = resolver as? UDPDNSResolver {
+                    records = try await udp.resolve(name: host, type: type, server: entry.ip, cancellation: cancellation)
+                } else {
+                    records = try await resolver.resolve(name: host, type: type, server: entry.ip)
+                }
                 result.values = records.map(\.value).sorted()
                 if result.values.isEmpty { result.error = L10nString("dnshealth.noanswer") }
             } catch {
@@ -92,17 +99,17 @@ final class DNSHealthViewModel {
         }
 
         consistent = DNSHealthEngine.consistent(results)
-        dnssec = await checkDNSSEC(host: host, type: type)
+        dnssec = await checkDNSSEC(host: host, type: type, cancellation: cancellation)
         await UnifiedNetworkInterface.release(lease)
         hasRun = true
         isRunning = false
     }
 
-    private func checkDNSSEC(host: String, type: DNSRecordType) async -> DNSSECStatus {
+    private func checkDNSSEC(host: String, type: DNSRecordType, cancellation: NetworkCancellationHandle) async -> DNSSECStatus {
         guard let query = try? DNSMessage.encodeQuery(name: host, type: type, id: 0x2A2A, dnssecOK: true) else {
             return .unknown
         }
-        let response = await UDPExchange.request(host: "1.1.1.1", port: 53, payload: query, timeout: 5)
+        let response = await UDPExchange.request(host: "1.1.1.1", port: 53, payload: query, timeout: 5, cancellation: cancellation)
         switch response {
         case .success(let data):
             let flags = DNSMessage.responseFlags(data)
