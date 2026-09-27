@@ -36,8 +36,12 @@ protocol NTPQuerying: Sendable {
 
 struct NTPService: NTPQuerying {
     func query(server: String) async throws -> NTPResult {
+        try await query(server: server, cancellation: nil)
+    }
+
+    func query(server: String, cancellation: NetworkCancellationHandle?) async throws -> NTPResult {
         let response = await UDPExchange.request(
-            host: server, port: 123, payload: NTP.request(), timeout: 5
+            host: server, port: 123, payload: NTP.request(), timeout: 5, cancellation: cancellation
         )
         switch response {
         case .success(let data):
@@ -79,8 +83,14 @@ final class NTPViewModel {
         let lease: UnifiedNetworkInterface.Lease
         do { lease = try await UnifiedNetworkInterface.claim(operation: "ntp", target: target) }
         catch { output = .failure(error.localizedDescription); return }
+        let cancellation = NetworkCancellationHandle()
+        await UnifiedNetworkInterface.registerCancellation(for: lease) { cancellation.cancel() }
         do {
-            output = .success(try await service.query(server: target))
+            if let ntp = service as? NTPService {
+                output = .success(try await ntp.query(server: target, cancellation: cancellation))
+            } else {
+                output = .success(try await service.query(server: target))
+            }
         } catch {
             output = .failure(error.localizedDescription)
         }
