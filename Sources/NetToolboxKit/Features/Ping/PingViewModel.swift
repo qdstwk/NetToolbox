@@ -67,6 +67,16 @@ final class PingViewModel {
         }
         resolvedIP = resolved.ip
 
+        let lease: GlobalNetworkOperationGate.Lease
+        do {
+            lease = try await GlobalNetworkOperationGate.shared.claim(operation: "ping", target: resolved.ip)
+        } catch {
+            errorMessage = error.localizedDescription
+            isRunning = false
+            return
+        }
+        defer { Task { await GlobalNetworkOperationGate.shared.release(lease) } }
+
         let tcpPinger = TCPPingService()
         var useICMP = true
         var collected: [PingAttempt] = []
