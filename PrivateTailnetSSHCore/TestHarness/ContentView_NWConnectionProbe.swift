@@ -2,11 +2,13 @@ import SwiftUI
 import Network
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     private let host = "100.69.114.104"
     private let port: UInt16 = 22
 
     @State private var status = "Ready — probe not started."
     @State private var isRunning = false
+    @State private var activeConnection: NWConnection?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -31,6 +33,13 @@ struct ContentView: View {
             Spacer()
         }
         .padding(24)
+        .onChange(of: scenePhase) { _, phase in
+            guard phase != .active else { return }
+            activeConnection?.forceCancel()
+            activeConnection = nil
+            isRunning = false
+            status = "CANCELLED: app left the active foreground; raw TCP probe was force-closed."
+        }
         .frame(minWidth: 620, minHeight: 360)
     }
 
@@ -60,6 +69,7 @@ struct ContentView: View {
             port: nwPort,
             using: .tcp
         )
+        activeConnection = connection
 
         let queue = DispatchQueue(label: "PrivateTailnetSSH.NWProbe")
 
@@ -77,12 +87,14 @@ struct ContentView: View {
                     append("state: READY")
                     append("PASS: raw Network.framework TCP connection reached .ready.")
                     isRunning = false
-                    connection.cancel()
+                    activeConnection = nil
+                    connection.forceCancel()
                 case .failed(let error):
                     append("state: FAILED")
                     append("NWError: \(String(reflecting: error))")
                     isRunning = false
-                    connection.cancel()
+                    activeConnection = nil
+                    connection.forceCancel()
                 case .cancelled:
                     append("state: cancelled")
                     if isRunning {
@@ -101,7 +113,8 @@ struct ContentView: View {
                 if isRunning {
                     append("TIMEOUT: no .ready/.failed after 10 seconds.")
                     isRunning = false
-                    connection.cancel()
+                    activeConnection = nil
+                    connection.forceCancel()
                 }
             }
         }
