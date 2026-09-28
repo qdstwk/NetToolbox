@@ -279,7 +279,15 @@ struct SnapshotSheet: View {
                 }
             }
         }
-        .task { await load() }
+        .safeAreaInset(edge: .bottom) {
+            if image == nil && !isLoading {
+                Button(L10nString("camera.snapshot.title")) {
+                    Task { await load() }
+                }
+                .buttonStyle(.borderedProminent)
+                .padding()
+            }
+        }
     }
 
     private func load() async {
