@@ -811,6 +811,7 @@ enum SSHError: LocalizedError {
     case channelSetupTimeout                  // 认证后打开 session channel 超过 10 秒：立即断开
     case execTimeout                          // exec 请求/输出等待超过 30 秒：立即断开
     case shellSetupTimeout                    // PTY + shell 建立超过 10 秒：立即断开
+    case rekeyUnsupported                      // 已进入加密会话后收到新 KEXINIT：v1 不尝试半实现 rekey，直接断开
     case concurrentSession                    // 全进程已有活动 SSH session：第二条连接在 start() 前拒绝
     case concurrentSend                       // 同一 SSH session 出现第二个并发 sender：fail closed，不排队
     case concurrentReceive                    // 同一 SSH client 出现第二个并发 reader：fail closed，防止 packet/nonce 状态被交叉消费
@@ -837,6 +838,7 @@ enum SSHError: LocalizedError {
         case .channelSetupTimeout: return "SSH session channel setup timed out"
         case .execTimeout: return "SSH exec timed out"
         case .shellSetupTimeout: return "SSH PTY/shell setup timed out"
+        case .rekeyUnsupported: return "SSH server requested rekey; this v1 session was closed"
         case .concurrentSession: return "Another SSH session is already active"
         case .concurrentSend: return "Concurrent SSH send is not allowed"
         case .concurrentReceive: return "Concurrent SSH receive is not allowed"
@@ -1508,6 +1510,11 @@ final class IntegratedSSHClient: @unchecked Sendable {
             let payload = try await receivePacket()
             guard let code = payload.first else { continue }
             switch code {
+            case Msg.kexInit where encrypt != nil || decrypt != nil:
+                // Rekey is intentionally not implemented in v1. Continuing with old
+                // cipher state after a peer KEXINIT would be unsafe/protocol-invalid.
+                close()
+                throw SSHError.rekeyUnsupported
             case Msg.disconnect:
                 var reader = IntegratedSSHWire.Reader(payload)
                 _ = reader.readByte()
