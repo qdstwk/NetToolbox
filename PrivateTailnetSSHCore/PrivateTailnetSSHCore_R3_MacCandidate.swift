@@ -242,7 +242,7 @@ final class SSHTCPConnection: @unchecked Sendable {
                 }
             }
             connection.start(queue: queue)
-            queue.asyncAfter(deadline: .now() + timeout) {
+            queue.asyncAfter(deadline: .now() + max(timeout, 0.1)) {
                 if settled.claim() {
                     // A deadline is a security boundary, not a graceful-shutdown request.
                     // Tear the transport down immediately so a late READY cannot revive it.
@@ -648,18 +648,37 @@ struct IntegratedSSHGCMCipher {
 // [ANNOTATION] 异步发送互斥门，核心目的不是 UI 同步，而是确保 AES-GCM nonce 与 packet 顺序一一对应。
 private actor SSHSendGate {
     private var busy = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
 
-// [ANNOTATION] 取得发送门；用于保证多个异步调用不会并发消费同一个 GCM 发送 nonce。
-    func enter() async {
-        if !busy { busy = true; return }
-        await withCheckedContinuation { waiters.append($0) }
+    // A second semantic sender is a programming error. Do not build a queue:
+    // PrivateTailnetSSH intentionally permits only one in-flight SSH packet send.
+    func claim() -> Bool {
+        guard !busy else { return false }
+        busy = true
+        return true
     }
 
-// [ANNOTATION] 释放发送门并唤醒下一个等待者，使 SSH packet 写入保持严格串行。
-    func leave() {
-        if waiters.isEmpty { busy = false }
-        else { waiters.removeFirst().resume() }
+    func release() { busy = false }
+}
+
+private final class SSHExclusiveSessionGate: @unchecked Sendable {
+    static let shared = SSHExclusiveSessionGate()
+
+    private let lock = NSLock()
+    private var active: UUID?
+
+    /// No queue: if any SSH session already owns network authority, the second
+    /// attempt fails immediately before NWConnection.start().
+    func claim(_ token: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard active == nil else { return false }
+        active = token
+        return true
+    }
+
+    /// Token matching prevents stale cleanup from releasing a newer session.
+    func release(_ token: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        if active == token { active = nil }
     }
 }
 
@@ -738,6 +757,8 @@ enum SSHError: LocalizedError {
     case channelSetupTimeout                  // 认证后打开 session channel 超过 10 秒：立即断开
     case execTimeout                          // exec 请求/输出等待超过 30 秒：立即断开
     case shellSetupTimeout                    // PTY + shell 建立超过 10 秒：立即断开
+    case concurrentSession                    // 全进程已有活动 SSH session：第二条连接在 start() 前拒绝
+    case concurrentSend                       // 同一 SSH session 出现第二个并发 sender：fail closed，不排队
     case concurrentReceive                    // 同一 SSH client 出现第二个并发 reader：fail closed，防止 packet/nonce 状态被交叉消费
     case channelFailed
     case protocolError
@@ -762,6 +783,8 @@ enum SSHError: LocalizedError {
         case .channelSetupTimeout: return "SSH session channel setup timed out"
         case .execTimeout: return "SSH exec timed out"
         case .shellSetupTimeout: return "SSH PTY/shell setup timed out"
+        case .concurrentSession: return "Another SSH session is already active"
+        case .concurrentSend: return "Concurrent SSH send is not allowed"
         case .concurrentReceive: return "Concurrent SSH receive is not allowed"
         case .channelFailed: return "SSH channel failed"
         case .protocolError: return "SSH protocol error"
@@ -810,6 +833,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
     private let host: String                 // 当前连接目标；Host Key pin 必须绑定到这个主机
     private let port: UInt16                 // 当前 SSH 端口；同一主机不同端口分别建立信任
     private let pinnedHostKey: PinnedSSHHostKey? // UI/持久化层传入的既有 pin；这里绝不自动覆盖
+    private let admissionToken = UUID()           // 全进程单 session 所有权；stale cleanup 不能释放其他实例
 // [ANNOTATION] 这是 SSH 连接状态机的跨步骤状态；其生命周期覆盖后续 KEX/加密/channel 操作，不能在未理解状态转换的情况下重置或共享。
     private var inbound: [UInt8] = []
 // [ANNOTATION] 这是 SSH 连接状态机的跨步骤状态；其生命周期覆盖后续 KEX/加密/channel 操作，不能在未理解状态转换的情况下重置或共享。
@@ -848,7 +872,10 @@ final class IntegratedSSHClient: @unchecked Sendable {
     }
 
 // [ANNOTATION] 对外 close() 是生命周期安全边界：用户断开或 App 失活时立即切断 transport，不做后台 graceful wait。
-    func close() { connection.forceCancel() }
+    func close() {
+        connection.forceCancel()
+        SSHExclusiveSessionGate.shared.release(admissionToken)
+    }
 
     /// Runs one phase under a race-safe wall-clock deadline. Swift Task cancellation
     /// is cooperative, so the watchdog force-cancels NWConnection itself when it wins.
@@ -1064,7 +1091,11 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
 // [ANNOTATION] 一次性 exec 流程：建链、认证、开 session、发送 exec 请求、收集 channel data/extended-data、记录 exit-status、维护接收窗口，最后返回结果。
     func run(username: String, auth: SSHAuth, command: String, timeout: Double) async throws -> SSHRunResult {
-        defer { connection.cancel() }
+        guard SSHExclusiveSessionGate.shared.claim(admissionToken) else { throw SSHError.concurrentSession }
+        defer {
+            connection.cancel()
+            SSHExclusiveSessionGate.shared.release(admissionToken)
+        }
         try await establish(username: username, auth: auth, timeout: timeout)
 
         let remoteChannel = try await withHardDeadline(
@@ -1142,31 +1173,39 @@ final class IntegratedSSHClient: @unchecked Sendable {
     /// with `readShellChunk()` (a background reader) and `sendShell(_:)`.
 // [ANNOTATION] 建立长连接 session，申请 xterm PTY 并请求 shell。当前 v1 固定 80×24，且是 line-oriented shell，不是完整终端模拟器。
     func openShell(username: String, auth: SSHAuth, timeout: Double) async throws {
-        try await establish(username: username, auth: auth, timeout: timeout)
+        guard SSHExclusiveSessionGate.shared.claim(admissionToken) else { throw SSHError.concurrentSession }
 
-        try await withHardDeadline(seconds: 10.0, timeoutError: .shellSetupTimeout) {
-            let channel = try await openSessionChannel()
-            shellChannel = channel
+        do {
+            try await establish(username: username, auth: auth, timeout: timeout)
 
-            var pty = Data([Msg.channelRequest])
-            pty = IntegratedSSHWire.putUInt32(channel, into: pty)
-            pty = IntegratedSSHWire.putString("pty-req", into: pty)
-            pty.append(0)                                  // want_reply = false
-            pty = IntegratedSSHWire.putString("xterm", into: pty)
-            pty = IntegratedSSHWire.putUInt32(80, into: pty)              // columns
-            pty = IntegratedSSHWire.putUInt32(24, into: pty)              // rows
-            pty = IntegratedSSHWire.putUInt32(0, into: pty)               // width px
-            pty = IntegratedSSHWire.putUInt32(0, into: pty)               // height px
-            pty = IntegratedSSHWire.putString(Data([0]), into: pty)       // empty terminal modes (TTY_OP_END)
-            try await sendPacket(pty)
+            try await withHardDeadline(seconds: 10.0, timeoutError: .shellSetupTimeout) {
+                let channel = try await openSessionChannel()
+                shellChannel = channel
 
-            var shell = Data([Msg.channelRequest])
-            shell = IntegratedSSHWire.putUInt32(channel, into: shell)
-            shell = IntegratedSSHWire.putString("shell", into: shell)
-            shell.append(0)                                // want_reply = false
-            try await sendPacket(shell)
-            stage = "shell"
+                var pty = Data([Msg.channelRequest])
+                pty = IntegratedSSHWire.putUInt32(channel, into: pty)
+                pty = IntegratedSSHWire.putString("pty-req", into: pty)
+                pty.append(0)                                  // want_reply = false
+                pty = IntegratedSSHWire.putString("xterm", into: pty)
+                pty = IntegratedSSHWire.putUInt32(80, into: pty)              // columns
+                pty = IntegratedSSHWire.putUInt32(24, into: pty)              // rows
+                pty = IntegratedSSHWire.putUInt32(0, into: pty)               // width px
+                pty = IntegratedSSHWire.putUInt32(0, into: pty)               // height px
+                pty = IntegratedSSHWire.putString(Data([0]), into: pty)       // empty terminal modes (TTY_OP_END)
+                try await sendPacket(pty)
+
+                var shell = Data([Msg.channelRequest])
+                shell = IntegratedSSHWire.putUInt32(channel, into: shell)
+                shell = IntegratedSSHWire.putString("shell", into: shell)
+                shell.append(0)                                // want_reply = false
+                try await sendPacket(shell)
+                stage = "shell"
+            }
+        } catch {
+            close()
+            throw error
         }
+        // Success deliberately keeps the global admission token until close()/EOF/error.
     }
 
     /// Blocks until the next chunk of shell output arrives; returns nil when
@@ -1179,21 +1218,29 @@ final class IntegratedSSHClient: @unchecked Sendable {
 // [ANNOTATION] 交互 shell 的静默不是超时错误；单次 read 由“前台生命周期”而不是短秒数界限约束。App 失活必须立即调用 close()。
     func readShellChunk() async throws -> String? {
         guard shellChannel != nil else { return nil }
-        while true {
-            let payload = try await nextPayload()
-            guard let code = payload.first else { continue }
-            var reader = IntegratedSSHWire.Reader(payload)
-            _ = reader.readByte()
-            switch code {
-            case Msg.channelData, Msg.channelExtData:
-                if code == Msg.channelExtData { _ = reader.readUInt32() }
-                _ = reader.readUInt32()
-                if let chunk = reader.readString() { return String(decoding: chunk, as: UTF8.self) }
-            case Msg.channelClose, Msg.channelEOF:
-                return nil
-            default:
-                continue
+        do {
+            while true {
+                let payload = try await nextPayload()
+                guard let code = payload.first else { continue }
+                var reader = IntegratedSSHWire.Reader(payload)
+                _ = reader.readByte()
+                switch code {
+                case Msg.channelData, Msg.channelExtData:
+                    if code == Msg.channelExtData { _ = reader.readUInt32() }
+                    _ = reader.readUInt32()
+                    if let chunk = reader.readString() { return String(decoding: chunk, as: UTF8.self) }
+                case Msg.channelClose, Msg.channelEOF:
+                    shellChannel = nil
+                    close()
+                    return nil
+                default:
+                    continue
+                }
             }
+        } catch {
+            shellChannel = nil
+            close()
+            throw error
         }
     }
 
@@ -1263,8 +1310,8 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
 // [ANNOTATION] SSH packet 封装与发送入口。加密后使用 AES-GCM + packet_length AAD；加密前按 SSH 基础 framing。整个发送过程受 actor gate 串行化。
     private func sendPacket(_ payload: Data) async throws {
-        // 多个 UI/reader task 即使同时要求发送，也必须严格串行；GCM nonce 每包只能消费一次。
-        await sendGate.enter()
+        // 不建立 sender 队列：第二个并发发送者直接 fail closed。
+        guard await sendGate.claim() else { throw SSHError.concurrentSend }
         do {
         if var cipher = encrypt {
             var pad = 16 - ((1 + payload.count) % 16)
