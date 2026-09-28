@@ -764,6 +764,24 @@ private final class SSHDeadlineState: @unchecked Sendable {
     }
 }
 
+private final class SSHShellChannelState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt32?
+
+    func set(_ channel: UInt32) {
+        lock.lock(); value = channel; lock.unlock()
+    }
+
+    func get() -> UInt32? {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func clear() {
+        lock.lock(); value = nil; lock.unlock()
+    }
+}
+
 private actor SSHReceiveGate {
     private var busy = false
 
@@ -910,8 +928,8 @@ final class IntegratedSSHClient: @unchecked Sendable {
     private(set) var hostKeyTypeName = "?"
 // [ANNOTATION] 这是 SSH 连接状态机的跨步骤状态；其生命周期覆盖后续 KEX/加密/channel 操作，不能在未理解状态转换的情况下重置或共享。
     private var sessionID = Data()
-// [ANNOTATION] 这是 SSH 连接状态机的跨步骤状态；其生命周期覆盖后续 KEX/加密/channel 操作，不能在未理解状态转换的情况下重置或共享。
-    private var shellChannel: UInt32?
+// [ANNOTATION] shell channel 会被 UI sender 与唯一 reader task 并发读取；用锁封装，避免 @unchecked Sendable 下的数据竞争。
+    private let shellChannelState = SSHShellChannelState()
 
 // [ANNOTATION] 初始化仅建立当前类型所需状态；所有 guard/默认值均属于冻结 R3 的原始安全或协议行为。
     init?(host: String, port: UInt16, pinnedHostKey: PinnedSSHHostKey? = nil) {
@@ -1266,7 +1284,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
             try await withHardDeadline(seconds: SSHAwaitLimits.shellSetup, timeoutError: .shellSetupTimeout) {
                 let channel = try await openSessionChannel()
-                shellChannel = channel
+                shellChannelState.set(channel)
 
                 var pty = Data([Msg.channelRequest])
                 pty = IntegratedSSHWire.putUInt32(channel, into: pty)
@@ -1303,7 +1321,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
     /// authority is lost, and close() force-cancels the transport.
 // [ANNOTATION] 交互 shell 的静默不是超时错误；单次 read 由“前台生命周期”而不是短秒数界限约束。App 失活必须立即调用 close()。
     func readShellChunk() async throws -> String? {
-        guard shellChannel != nil else { return nil }
+        guard shellChannelState.get() != nil else { return nil }
         do {
             while true {
                 let payload = try await nextPayload()
@@ -1326,7 +1344,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
                 case Msg.channelClose, Msg.channelEOF:
                     guard reader.readUInt32() == 0, reader.isAtEnd else { throw SSHError.protocolError }
-                    shellChannel = nil
+                    shellChannelState.clear()
                     close()
                     return nil
 
@@ -1341,7 +1359,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
                 }
             }
         } catch {
-            shellChannel = nil
+            shellChannelState.clear()
             close()
             throw error
         }
@@ -1351,7 +1369,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
     /// concurrently with another send.
 // [ANNOTATION] 把 UI 输入作为 SSH_MSG_CHANNEL_DATA 发给当前 shell channel；调用方应避免并发发送。
     func sendShell(_ text: String) async throws {
-        guard let channel = shellChannel else { return }
+        guard let channel = shellChannelState.get() else { return }
         var data = Data([Msg.channelData])
         data = IntegratedSSHWire.putUInt32(channel, into: data)
         data = IntegratedSSHWire.putString(Data(text.utf8), into: data)
