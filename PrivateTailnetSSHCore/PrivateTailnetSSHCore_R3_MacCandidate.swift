@@ -926,6 +926,11 @@ final class IntegratedSSHClient: @unchecked Sendable {
     private(set) var stage = "connect"
     private(set) var fingerprint = ""
     private(set) var hostKeyTypeName = "?"
+    // RFC 4252 USERAUTH_FAILURE diagnostics. These never contain the password.
+    // They let the harness distinguish outright rejection from partial success
+    // without weakening the fail-closed auth behavior.
+    private(set) var lastAuthMethods: [String] = []
+    private(set) var lastAuthPartialSuccess: Bool? = nil
 // [ANNOTATION] 这是 SSH 连接状态机的跨步骤状态；其生命周期覆盖后续 KEX/加密/channel 操作，不能在未理解状态转换的情况下重置或共享。
     private var sessionID = Data()
 // [ANNOTATION] shell channel 会被 UI sender 与唯一 reader task 并发读取；用锁封装，避免 @unchecked Sendable 下的数据竞争。
@@ -1117,6 +1122,9 @@ final class IntegratedSSHClient: @unchecked Sendable {
     }
 
     private func authenticate(username: String, auth: SSHAuth) async throws {
+        lastAuthMethods = []
+        lastAuthPartialSuccess = nil
+
         var request = Data([Msg.userauthRequest])
         request = IntegratedSSHWire.putString(username, into: request)
         request = IntegratedSSHWire.putString("ssh-connection", into: request)
@@ -1139,10 +1147,30 @@ final class IntegratedSSHClient: @unchecked Sendable {
         while true {
             let payload = try await nextPayload()
             switch payload.first {
-            case Msg.userauthSuccess: return
-            case Msg.userauthBanner: continue
-            case Msg.userauthFailure: throw SSHError.authFailed
-            default: throw SSHError.protocolError
+            case Msg.userauthSuccess:
+                return
+
+            case Msg.userauthBanner:
+                continue
+
+            case Msg.userauthFailure:
+                // RFC 4252 §5.1: USERAUTH_FAILURE carries a name-list of
+                // methods that can continue plus a partial-success boolean.
+                // Preserve those diagnostics while keeping the public failure
+                // behavior fail-closed.
+                var reader = IntegratedSSHWire.Reader(payload)
+                guard reader.readByte() == Msg.userauthFailure,
+                      let methods = reader.readNameList(),
+                      let partialByte = reader.readByte(),
+                      reader.isAtEnd else {
+                    throw SSHError.protocolError
+                }
+                lastAuthMethods = methods
+                lastAuthPartialSuccess = partialByte != 0
+                throw SSHError.authFailed
+
+            default:
+                throw SSHError.protocolError
             }
         }
     }
