@@ -59,6 +59,8 @@ struct ContentView: View {
 
                 SecureField("HP-NAS SSH password — local only", text: $password)
                     .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
                     .disabled(verifiedPin == nil || isRunning)
 
                 Button(isRunning ? "Working…" : "2. Run full Core: exec + PTY/shell") {
@@ -275,6 +277,26 @@ struct ContentView: View {
                 command: "printf 'PDA_IPAD_EXEC_OK'; exit 23",
                 timeout: 10
             )
+        } catch SSHError.authFailed {
+            status = """
+            FAIL: HP-NAS rejected the password on iPadOS before exec began.
+
+            Exact Host Key / trusted reconnect:
+            PASS
+
+            Core stage:
+            userauth
+
+            No exec command was accepted.
+            Re-enter the password locally; the field has already been cleared.
+            """
+            return
+        } catch SSHError.hostKeyChanged {
+            status = "HARD FAIL: HP-NAS Host Key changed before iPad password authentication."
+            return
+        } catch SSHError.execTimeout {
+            status = "FAIL: iPad exec exceeded the hard deadline after authentication."
+            return
         } catch {
             status = """
             FAIL during iPad exec stage.
