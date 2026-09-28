@@ -185,10 +185,13 @@ enum SSHTailnetDestinationPolicy {
         var octets: [UInt8] = []
         octets.reserveCapacity(4)
         for part in parts {
-            // 只接受十进制规范 IPv4；拒绝空段、符号、十六进制和可能产生歧义的前导零。
-            guard !part.isEmpty, part.allSatisfy({ $0.isNumber }),
-                  part.count == 1 || part.first != "0",
-                  let value = UInt8(part) else { return nil }
+            // 只接受 ASCII 十进制规范 IPv4；拒绝 Unicode 数字、空段、符号、
+            // 十六进制、超长 octet 和可能产生歧义的前导零。
+            let bytes = Array(part.utf8)
+            guard (1...3).contains(bytes.count),
+                  bytes.allSatisfy({ (0x30...0x39).contains($0) }),
+                  bytes.count == 1 || bytes[0] != 0x30,
+                  let value = UInt8(String(part)) else { return nil }
             octets.append(value)
         }
         return octets.map(String.init).joined(separator: ".")
@@ -481,21 +484,21 @@ enum IntegratedSSHCrypto {
         guard let keyType = keyReader.readStringUTF8() else { return false }
         var sigReader = IntegratedSSHWire.Reader(signature)
         guard let sigType = sigReader.readStringUTF8(),
-              let sigBlob = sigReader.readString() else { return false }
+              let sigBlob = sigReader.readString(),
+              sigReader.isAtEnd else { return false }
 
         switch keyType {
         case "ssh-ed25519":
             guard sigType == "ssh-ed25519",
                   let pub = keyReader.readString(), pub.count == 32,
-                  keyReader.isAtEnd, sigReader.isAtEnd,
+                  keyReader.isAtEnd,
                   let key = try? Curve25519.Signing.PublicKey(rawRepresentation: pub) else { return false }
             return key.isValidSignature(sigBlob, for: hash)
 
         case "ecdsa-sha2-nistp256":
             guard sigType == "ecdsa-sha2-nistp256",
                   keyReader.readStringUTF8() == "nistp256",     // 算法名与曲线名必须一致，拒绝算法混淆
-                  let point = keyReader.readString(), keyReader.isAtEnd,
-                  sigReader.isAtEnd,
+                  let point = keyReader.readString(), point.count == 65, keyReader.isAtEnd,
                   let key = try? P256.Signing.PublicKey(x963Representation: point) else { return false }
             // The ecdsa signature blob is itself string(mpint r) || string(mpint s).
             var inner = IntegratedSSHWire.Reader(sigBlob)
@@ -512,15 +515,33 @@ enum IntegratedSSHCrypto {
         }
     }
 
-    /// Left-pads (or trims) an mpint magnitude to exactly 32 bytes for the
-    /// fixed-width raw ECDSA representation CryptoKit expects.
-// [ANNOTATION] 把 SSH ECDSA 的正 mpint r/s 严格规范成 CryptoKit 要求的 32 字节标量；超长、空值直接拒绝。
+    /// Strictly decodes a *positive* SSH mpint to its unsigned magnitude.
+    /// Rejects negative encodings and non-minimal redundant sign bytes.
+    private static func strictPositiveMPInt(_ value: Data, maxMagnitudeBytes: Int) -> Data? {
+        let bytes = Array(value)
+        guard !bytes.isEmpty else { return nil }
+
+        let magnitude: ArraySlice<UInt8>
+        if bytes[0] == 0 {
+            // A sign-protection 0x00 is legal only when the next byte's high bit is 1.
+            guard bytes.count > 1, bytes[1] & 0x80 != 0 else { return nil }
+            magnitude = bytes.dropFirst()
+        } else {
+            // High bit 1 without a sign-protection 0x00 is a negative mpint.
+            guard bytes[0] & 0x80 == 0 else { return nil }
+            magnitude = bytes[...]
+        }
+
+        guard !magnitude.isEmpty, magnitude.count <= maxMagnitudeBytes else { return nil }
+        return Data(magnitude)
+    }
+
+    /// Left-pads a strict positive mpint to exactly 32 bytes for the fixed-width
+    /// P-256 raw signature representation CryptoKit expects.
+// [ANNOTATION] ECDSA r/s 必须是最小编码的正 mpint；负值、冗余前导零、空值、超长值一律拒绝。
     private static func strictP256Scalar(_ value: Data) -> Data? {
-        // SSH ECDSA 的 r/s 是正 mpint；去掉合法的符号零后最多只能有 32 字节。
-        var bytes = Array(value)
-        while bytes.first == 0 { bytes.removeFirst() }
-        guard !bytes.isEmpty, bytes.count <= 32 else { return nil }
-        return Data(repeating: 0, count: 32 - bytes.count) + Data(bytes)
+        guard let magnitude = strictPositiveMPInt(value, maxMagnitudeBytes: 32) else { return nil }
+        return Data(repeating: 0, count: 32 - magnitude.count) + magnitude
     }
 
 // [ANNOTATION] 把 SSH RSA 的 n/e 转成 DER 公钥，通过 Security.framework 按协商的 rsa-sha2-256/512 验证交换哈希签名。
@@ -529,7 +550,21 @@ enum IntegratedSSHCrypto {
     ) -> Bool {
         var keyReader = inputReader
         #if canImport(Security)
-        guard let e = keyReader.readString(), let n = keyReader.readString() else { return false }
+        guard let eEncoded = keyReader.readString(),
+              let nEncoded = keyReader.readString(),
+              keyReader.isAtEnd,
+              let e = strictPositiveMPInt(eEncoded, maxMagnitudeBytes: 8),
+              let n = strictPositiveMPInt(nEncoded, maxMagnitudeBytes: 1_024),
+              let first = n.first else { return false }
+
+        // Reject obsolete/tiny RSA host keys and pathological giant keys before Security.framework.
+        let modulusBits = n.count * 8 - first.leadingZeroBitCount
+        guard modulusBits >= 2_048, modulusBits <= 8_192 else { return false }
+
+        // Public exponent must be an odd integer >= 3.
+        let exponent = e.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        guard exponent >= 3, exponent & 1 == 1 else { return false }
+
         // RSAPublicKey ::= SEQUENCE { modulus INTEGER, publicExponent INTEGER }
         let der = derSequence([derInteger(n), derInteger(e)])
         let attributes: [CFString: Any] = [
@@ -1310,8 +1345,11 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
 // [ANNOTATION] SSH packet 封装与发送入口。加密后使用 AES-GCM + packet_length AAD；加密前按 SSH 基础 framing。整个发送过程受 actor gate 串行化。
     private func sendPacket(_ payload: Data) async throws {
-        // 不建立 sender 队列：第二个并发发送者直接 fail closed。
-        guard await sendGate.claim() else { throw SSHError.concurrentSend }
+        // 不建立 sender 队列：第二个并发发送者直接 fail closed，并立即切断本 session。
+        guard await sendGate.claim() else {
+            close()
+            throw SSHError.concurrentSend
+        }
         do {
         if var cipher = encrypt {
             var pad = 16 - ((1 + payload.count) % 16)
@@ -1342,6 +1380,8 @@ final class IntegratedSSHClient: @unchecked Sendable {
         await sendGate.leave()
         } catch {
             await sendGate.leave()
+            // 任何发送路径异常都视为 transport 状态不可继续安全复用。
+            close()
             throw error
         }
     }
@@ -1382,7 +1422,10 @@ final class IntegratedSSHClient: @unchecked Sendable {
     /// housekeeping messages and turning DISCONNECT into an error.
 // [ANNOTATION] 过滤 SSH transport housekeeping 消息；DISCONNECT 转成错误，IGNORE/DEBUG 跳过，GLOBAL_REQUEST 按 want-reply 必要时回复 failure。
     private func nextPayload() async throws -> Data {
-        guard await receiveGate.claim() else { throw SSHError.concurrentReceive }
+        guard await receiveGate.claim() else {
+            close()
+            throw SSHError.concurrentReceive
+        }
         do {
             let payload = try await nextPayloadUnlocked()
             await receiveGate.release()
@@ -1472,9 +1515,10 @@ final class IntegratedSSHClient: @unchecked Sendable {
 // [ANNOTATION] 读取 SSH identification 文本行；限制缓存为 8192 字节，并在字节层剥离 CR/LF，避免 Swift grapheme 处理破坏 exchange-hash 中的 V_S。
     private func readLine() async throws -> String {
         while true {
-            // SSH identification 行属于不可信网络输入；限制缓存，避免无换行数据无限增长。
-            guard inbound.count <= 8_192 else { throw SSHError.protocolError }
+            // SSH identification 行属于不可信网络输入。若已经找到换行，只限制当前行；
+            // 不因同一 TCP chunk 后面顺带带了 KEX 数据而误判超长。
             if let newline = inbound.firstIndex(of: 0x0A) {
+                guard newline <= 8_192 else { throw SSHError.protocolError }
                 var line = Array(inbound[0...newline])
                 inbound.removeFirst(newline + 1)
                 // Trim trailing CR / LF at the BYTE level. Doing it on the
@@ -1485,6 +1529,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
                 while line.last == 0x0A || line.last == 0x0D { line.removeLast() }
                 return String(decoding: line, as: UTF8.self)
             }
+            guard inbound.count <= 8_192 else { throw SSHError.protocolError }
             try await fill()
         }
     }
