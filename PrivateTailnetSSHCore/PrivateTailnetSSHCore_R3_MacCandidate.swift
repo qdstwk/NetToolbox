@@ -1463,9 +1463,9 @@ final class IntegratedSSHClient: @unchecked Sendable {
             packet.append(try randomBytes(pad))
             try await writeRaw(packet)
         }
-        await sendGate.leave()
+        await sendGate.release()
         } catch {
-            await sendGate.leave()
+            await sendGate.release()
             // 任何发送路径异常都视为 transport 状态不可继续安全复用。
             close()
             throw error
