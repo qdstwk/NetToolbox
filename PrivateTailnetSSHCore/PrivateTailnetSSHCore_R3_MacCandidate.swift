@@ -123,6 +123,24 @@ enum SSHHostTrust {
     }
 }
 
+// MARK: - SSHAwaitLimits
+
+/// Hard upper bounds for every network-facing await in the Core.
+/// Callers may request a shorter establishment timeout, but can never extend it
+/// beyond the audited ceiling. Interactive shell reads are the sole exception:
+/// they are lifetime-bounded by foreground authority rather than a short silence timer.
+private enum SSHAwaitLimits {
+    static let establishment: Double = 12.0       // TCP start + SSH identification/KEX/pin/NEWKEYS/userauth, total
+    static let transportSend: Double = 5.0        // one NWConnection.send completion
+    static let channelSetup: Double = 10.0        // SSH session-channel open
+    static let exec: Double = 30.0                // one-shot exec request + output/close
+    static let shellSetup: Double = 10.0           // session open + PTY + shell request
+
+    static func cappedEstablishment(_ requested: Double) -> Double {
+        min(max(requested, 0.1), establishment)
+    }
+}
+
 // MARK: - SSHTCPConnection
 
 // [ANNOTATION] TCP/目的地址门禁层的错误集合，与更高层 SSH 协议错误分开。
@@ -226,7 +244,8 @@ final class SSHTCPConnection: @unchecked Sendable {
 
 // [ANNOTATION] 使用当前 AES-GCM nonce 验证并解密服务器 packet；认证失败不会返回明文，并且 nonce 只在成功后推进。
     func open(timeout: Double) async -> Result<Void, SSHTransportError> {
-        await withCheckedContinuation { continuation in
+        let deadline = SSHAwaitLimits.cappedEstablishment(timeout)
+        return await withCheckedContinuation { continuation in
             let shot = SSHOneShot(continuation)
             let settled = SSHAtomicFlag()
             let connection = self.connection
@@ -245,7 +264,7 @@ final class SSHTCPConnection: @unchecked Sendable {
                 }
             }
             connection.start(queue: queue)
-            queue.asyncAfter(deadline: .now() + max(timeout, 0.1)) {
+            queue.asyncAfter(deadline: .now() + deadline) {
                 if settled.claim() {
                     // A deadline is a security boundary, not a graceful-shutdown request.
                     // Tear the transport down immediately so a late READY cannot revive it.
@@ -258,7 +277,7 @@ final class SSHTCPConnection: @unchecked Sendable {
 
 // [ANNOTATION] 把 Network.framework 的回调式发送包装成 async Result；每次发送最多等待 5 秒。
 // 超时代表“字节是否已被对端处理”已经不可安全判定，因此立即 force-cancel 整条 SSH transport，禁止继续复用。
-    func send(_ data: Data, timeout: Double = 5.0) async -> Result<Void, SSHTransportError> {
+    func send(_ data: Data, timeout: Double = SSHAwaitLimits.transportSend) async -> Result<Void, SSHTransportError> {
         await withCheckedContinuation { continuation in
             let shot = SSHOneShot(continuation)
             let settled = SSHAtomicFlag()
@@ -953,14 +972,15 @@ final class IntegratedSSHClient: @unchecked Sendable {
     /// NOT close the connection — callers own the lifecycle.
 // [ANNOTATION] 完整 SSH 建链状态机：TCP → identification → KEXINIT → X25519 → Host Key 签名验证 → pin 决策 → NEWKEYS → userauth service → 密码认证。真实密码路径只能发生在 Host Key 验证与信任检查之后。
     private func establish(username: String, auth: SSHAuth, timeout: Double) async throws {
-        switch await connection.open(timeout: timeout) {
-        case .success: break
-        case .failure(let error): throw SSHError.transport(error.localizedDescription)
-        }
+        let deadline = SSHAwaitLimits.cappedEstablishment(timeout)
 
-        // TCP READY 以后，identification → KEX → Host Key → NEWKEYS → userauth
-        // 共用一个硬 deadline。watchdog 直接 force-cancel NWConnection，而不是只 cancel Swift Task。
-        try await withHardDeadline(seconds: max(timeout, 1.0), timeoutError: .handshakeTimeout) {
+        // 一个总 deadline 覆盖 TCP start + identification + KEX + Host Key/pin +
+        // NEWKEYS + userauth。不能把“12 秒连接 + 12 秒握手”串成 24 秒。
+        try await withHardDeadline(seconds: deadline, timeoutError: .handshakeTimeout) {
+            switch await connection.open(timeout: deadline) {
+            case .success: break
+            case .failure(let error): throw SSHError.transport(error.localizedDescription)
+            }
             try await establishAfterTCPReady(username: username, auth: auth)
         }
     }
@@ -1134,13 +1154,13 @@ final class IntegratedSSHClient: @unchecked Sendable {
         try await establish(username: username, auth: auth, timeout: timeout)
 
         let remoteChannel = try await withHardDeadline(
-            seconds: 10.0,
+            seconds: SSHAwaitLimits.channelSetup,
             timeoutError: .channelSetupTimeout
         ) {
             try await openSessionChannel()
         }
 
-        return try await withHardDeadline(seconds: 30.0, timeoutError: .execTimeout) {
+        return try await withHardDeadline(seconds: SSHAwaitLimits.exec, timeoutError: .execTimeout) {
             var exec = Data([Msg.channelRequest])
             exec = IntegratedSSHWire.putUInt32(remoteChannel, into: exec)
             exec = IntegratedSSHWire.putString("exec", into: exec)
@@ -1213,7 +1233,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
         do {
             try await establish(username: username, auth: auth, timeout: timeout)
 
-            try await withHardDeadline(seconds: 10.0, timeoutError: .shellSetupTimeout) {
+            try await withHardDeadline(seconds: SSHAwaitLimits.shellSetup, timeoutError: .shellSetupTimeout) {
                 let channel = try await openSessionChannel()
                 shellChannel = channel
 
