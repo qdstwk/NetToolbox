@@ -100,3 +100,59 @@ The MVP transport implements OpenSSH AES-GCM AEAD and does not implement the adv
 
 ### Rootshell comparison: algorithm policy
 Rootshell's SSHCustomAlgorithms demonstrates broader mature compatibility (additional KEX and CTR/ETM schemes), but these depend on NIOSSH/Citadel and are intentionally NOT imported into the Playground core. PrivateTailnetSSH prefers a narrow, audited algorithm set over broad compatibility for its known modern OpenSSH servers.
+
+
+## 2026-09-28 current-candidate static security pass
+
+Audit target:
+- runtime candidate: `PrivateTailnetSSHCore_R3_MacCandidate.swift`
+- audited code commit: `1e39f4870404e55ea2a6cd9c473961ad643cbacd`
+- audited core blob: `c616735e342102a1d5550f895a8da7b0a79eb5fa`
+- current core length at that commit: 1,628 lines
+- current test/harness files were also re-scanned; frozen `Upstream/`, `References/`, old R3 diagnostic copies and prior revisions remain evidence/reference only and are not runtime approval targets.
+
+### Await/deadline policy now fixed in code
+- total establishment (TCP start + SSH identification + KEX + Host Key verification/pin + NEWKEYS + userauth): hard ceiling 12 s; caller may request shorter but cannot extend it;
+- each transport send completion: 5 s;
+- session-channel setup: 10 s;
+- one-shot exec including output/close: 30 s;
+- PTY/shell setup: 10 s;
+- interactive shell receive intentionally has no short silence timeout; its authority boundary is foreground lifetime. Leaving the active foreground must force-close the transport.
+
+Deadline expiry uses `NWConnection.forceCancel()`, not a cooperative Swift-task cancellation alone. Send timeout also force-closes because post-timeout wire/nonce state is not safe to reuse.
+
+### Concurrency / single-path hardening
+- process-wide `SSHExclusiveSessionGate`: only one active `IntegratedSSHClient` network session; no queue;
+- outbound packets: one sender only; a second concurrent sender force-closes the session;
+- inbound packets: one reader only; a second concurrent reader force-closes the session;
+- interactive shell channel state moved behind an `NSLock` wrapper to remove the remaining intentional reader/UI access race;
+- unsupported encrypted-session rekey (`SSH_MSG_KEXINIT`) now fails closed instead of being silently ignored.
+
+### Parser / trust hardening added in this pass
+- Tailnet IPv4 parser now accepts ASCII canonical decimal only;
+- SSH signature wrapper must be fully consumed (no trailing bytes);
+- P-256 point length is strict and ECDSA r/s must be canonical positive mpints;
+- RSA e/n must be canonical positive mpints; modulus restricted to 2048...8192 bits; exponent must be odd and >= 3; trailing key fields are rejected;
+- SERVICE_ACCEPT is checked for exactly `ssh-userauth`;
+- the sole local SSH channel id is validated on channel confirmation/data/extended-data/request/window/EOF/close messages;
+- malformed channel identities/structures fail closed.
+
+### RSA API clarification
+An earlier audit note claimed the Apple Security `rsaSignatureDigest...` API should be used because the SSH exchange hash H is already a digest. That conclusion is superseded. SSH signs the exchange-hash bytes H as the *message/data* supplied to the negotiated RSA-SHA2 signature algorithm, which then applies SHA-256/SHA-512 per RFC 8332. The current `rsaSignatureMessagePKCS1v15SHA256/512` path is therefore the intended semantics. Deterministic RSA regression vectors remain the compile/runtime oracle for this path.
+
+### Static sensitive-path scan at current candidate
+Core scan:
+- persistence/cloud/clipboard APIs: 0
+- logging APIs: 0
+- `Task.detached`, task groups, `async let`, global dispatch concurrency: 0
+- production `NWConnection(...)` creation sites: 1
+- `URLSession`: 0
+- `try!`, forced cast, `fatalError`, `preconditionFailure`: 0
+- security randomness: `SecRandomCopyBytes` only
+
+Test harnesses were hardened so leaving the active scene force-closes the active test client/raw probe as well.
+
+### Current disposition
+No known static CRITICAL/HIGH password-disclosure, Host-Key fail-open, nonce-reuse, second-reader, second-session, background-network, or unbounded-handshake/exec path remains in the current runtime candidate.
+
+This is **not** a final interoperability/security acceptance. Current head still requires a fresh compile after these 2026-09-28 changes, then the Master-defined live sequence: changed/wrong-pin negative test -> exact-pin trusted reconnect -> real password auth -> exec -> PTY/shell -> full iPadOS Core validation. A compile PASS alone must not be promoted to SSH interoperability PASS.
