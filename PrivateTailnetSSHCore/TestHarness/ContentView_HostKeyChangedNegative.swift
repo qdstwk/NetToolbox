@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     // Negative security test:
     // Deliberately install a WRONG exact Host Key pin for the real HP-NAS.
     // The sentinel password must never reach SSH user authentication.
@@ -10,6 +11,7 @@ struct ContentView: View {
 
     @State private var status = "Ready — negative Host Key test not started."
     @State private var isRunning = false
+    @State private var activeClient: IntegratedSSHClient?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -34,6 +36,13 @@ struct ContentView: View {
             Spacer()
         }
         .padding(24)
+        .onChange(of: scenePhase) { _, phase in
+            guard phase != .active else { return }
+            activeClient?.close()
+            activeClient = nil
+            isRunning = false
+            status = "CANCELLED: app left the active foreground; SSH transport was force-closed."
+        }
         .frame(minWidth: 700, minHeight: 380)
     }
 
@@ -63,7 +72,11 @@ struct ContentView: View {
             return
         }
 
-        defer { client.close() }
+        activeClient = client
+        defer {
+            client.close()
+            activeClient = nil
+        }
 
         do {
             _ = try await client.run(
