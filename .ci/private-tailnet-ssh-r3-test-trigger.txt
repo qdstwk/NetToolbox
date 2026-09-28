@@ -1,0 +1,2 @@
+PrivateTailnetSSH R3 CI trigger — 2026-09-28
+Purpose: force a pull_request CI run against r3-mac-test after the await/security hardening pass.
