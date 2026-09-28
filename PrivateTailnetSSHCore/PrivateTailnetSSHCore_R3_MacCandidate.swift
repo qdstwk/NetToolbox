@@ -244,21 +244,33 @@ final class SSHTCPConnection: @unchecked Sendable {
             connection.start(queue: queue)
             queue.asyncAfter(deadline: .now() + timeout) {
                 if settled.claim() {
-                    connection.cancel()
+                    // A deadline is a security boundary, not a graceful-shutdown request.
+                    // Tear the transport down immediately so a late READY cannot revive it.
+                    connection.forceCancel()
                     shot.resume(.failure(.timeout))
                 }
             }
         }
     }
 
-// [ANNOTATION] 把 Network.framework 的回调式发送包装成 async Result；只有 contentProcessed 成功才视为本次字节写入完成。
-    func send(_ data: Data) async -> Result<Void, SSHTransportError> {
+// [ANNOTATION] 把 Network.framework 的回调式发送包装成 async Result；每次发送最多等待 5 秒。
+// 超时代表“字节是否已被对端处理”已经不可安全判定，因此立即 force-cancel 整条 SSH transport，禁止继续复用。
+    func send(_ data: Data, timeout: Double = 5.0) async -> Result<Void, SSHTransportError> {
         await withCheckedContinuation { continuation in
             let shot = SSHOneShot(continuation)
+            let settled = SSHAtomicFlag()
+            let connection = self.connection
             connection.send(content: data, completion: .contentProcessed { error in
+                guard settled.claim() else { return }
                 if let error { shot.resume(.failure(.connection(error.localizedDescription))) }
                 else { shot.resume(.success(())) }
             })
+            queue.asyncAfter(deadline: .now() + max(timeout, 0.1)) {
+                if settled.claim() {
+                    connection.forceCancel()
+                    shot.resume(.failure(.timeout))
+                }
+            }
         }
     }
 
@@ -276,8 +288,9 @@ final class SSHTCPConnection: @unchecked Sendable {
         }
     }
 
-// [ANNOTATION] 此函数封装本类型中的一个独立协议/状态操作；输入边界与错误返回保持原 R3 行为，不在注释版中改变控制流。
+// [ANNOTATION] 正常收尾可使用 graceful cancel；安全 deadline / App 失活必须使用 forceCancel 立即切断底层协议。
     func cancel() { connection.cancel() }
+    func forceCancel() { connection.forceCancel() }
 }
 
 // MARK: - SSHWire
@@ -650,11 +663,32 @@ private actor SSHSendGate {
     }
 }
 
-private final class SSHHandshakeTimeoutState: @unchecked Sendable {
+private final class SSHDeadlineState: @unchecked Sendable {
     private let lock = NSLock()
+    private var settled = false
     private var timedOut = false
-    func markTimedOut() { lock.lock(); timedOut = true; lock.unlock() }
-    var didTimeOut: Bool { lock.lock(); defer { lock.unlock() }; return timedOut }
+
+    /// Returns true only for the one deadline callback that wins the race.
+    func claimTimeout() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !settled else { return false }
+        settled = true
+        timedOut = true
+        return true
+    }
+
+    /// Returns true only when the operation completes before the deadline wins.
+    func finishBeforeTimeout() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !settled else { return false }
+        settled = true
+        return true
+    }
+
+    var didTimeOut: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return timedOut
+    }
 }
 
 private actor SSHReceiveGate {
@@ -701,6 +735,9 @@ enum SSHError: LocalizedError {
     case hostKeyChanged                       // 已固定的 Host Key 发生变化：硬阻断，绝不自动替换
     case authFailed
     case handshakeTimeout                    // TCP 已建立后，KEX/Host Key/NEWKEYS/userauth 超过总 deadline：强制关闭连接
+    case channelSetupTimeout                  // 认证后打开 session channel 超过 10 秒：立即断开
+    case execTimeout                          // exec 请求/输出等待超过 30 秒：立即断开
+    case shellSetupTimeout                    // PTY + shell 建立超过 10 秒：立即断开
     case concurrentReceive                    // 同一 SSH client 出现第二个并发 reader：fail closed，防止 packet/nonce 状态被交叉消费
     case channelFailed
     case protocolError
@@ -722,6 +759,9 @@ enum SSHError: LocalizedError {
         case .hostKeyChanged: return "SSH host key changed; password was not sent"
         case .authFailed: return "SSH authentication failed"
         case .handshakeTimeout: return "SSH handshake/authentication timed out"
+        case .channelSetupTimeout: return "SSH session channel setup timed out"
+        case .execTimeout: return "SSH exec timed out"
+        case .shellSetupTimeout: return "SSH PTY/shell setup timed out"
         case .concurrentReceive: return "Concurrent SSH receive is not allowed"
         case .channelFailed: return "SSH channel failed"
         case .protocolError: return "SSH protocol error"
@@ -807,8 +847,42 @@ final class IntegratedSSHClient: @unchecked Sendable {
         self.pinnedHostKey = pinnedHostKey
     }
 
-// [ANNOTATION] 此函数封装本类型中的一个独立协议/状态操作；输入边界与错误返回保持原 R3 行为，不在注释版中改变控制流。
-    func close() { connection.cancel() }
+// [ANNOTATION] 对外 close() 是生命周期安全边界：用户断开或 App 失活时立即切断 transport，不做后台 graceful wait。
+    func close() { connection.forceCancel() }
+
+    /// Runs one phase under a race-safe wall-clock deadline. Swift Task cancellation
+    /// is cooperative, so the watchdog force-cancels NWConnection itself when it wins.
+    private func withHardDeadline<T>(
+        seconds: Double,
+        timeoutError: SSHError,
+        operation: () async throws -> T
+    ) async throws -> T {
+        let deadline = max(seconds, 0.1)
+        let state = SSHDeadlineState()
+        let watchdog = Task { [connection] in
+            do {
+                try await Task.sleep(for: .seconds(deadline))
+                guard !Task.isCancelled else { return }
+                if state.claimTimeout() {
+                    connection.forceCancel()
+                }
+            } catch {
+                // Normal completion cancels the watchdog.
+            }
+        }
+        defer { watchdog.cancel() }
+
+        do {
+            let value = try await operation()
+            if state.finishBeforeTimeout() { return value }
+            if state.didTimeOut { throw timeoutError }
+            throw timeoutError
+        } catch {
+            if state.finishBeforeTimeout() { throw error }
+            if state.didTimeOut { throw timeoutError }
+            throw error
+        }
+    }
 
     // MARK: - Handshake (shared by exec and shell)
 
@@ -822,30 +896,11 @@ final class IntegratedSSHClient: @unchecked Sendable {
         case .failure(let error): throw SSHError.transport(error.localizedDescription)
         }
 
-        // TCP READY 以后仍必须有独立的总 deadline。仅取消 Swift Task 不足以保证
-        // Network.framework 的 pending receive 立即退出，因此 watchdog 到期时直接
-        // cancel 底层 NWConnection；这会打断 readLine/readExact/expect/authenticate。
-        let handshakeDeadline = max(timeout, 1.0)
-        let timeoutState = SSHHandshakeTimeoutState()
-        let watchdog = Task { [connection] in
-            do {
-                try await Task.sleep(for: .seconds(handshakeDeadline))
-                guard !Task.isCancelled else { return }
-                timeoutState.markTimedOut()
-                connection.cancel()
-            } catch {
-                // establish 正常结束时 watchdog 被 cancel；无需做任何事。
-            }
-        }
-        defer { watchdog.cancel() }
-
-        do {
+        // TCP READY 以后，identification → KEX → Host Key → NEWKEYS → userauth
+        // 共用一个硬 deadline。watchdog 直接 force-cancel NWConnection，而不是只 cancel Swift Task。
+        try await withHardDeadline(seconds: max(timeout, 1.0), timeoutError: .handshakeTimeout) {
             try await establishAfterTCPReady(username: username, auth: auth)
-        } catch {
-            if timeoutState.didTimeOut { throw SSHError.handshakeTimeout }
-            throw error
         }
-        if timeoutState.didTimeOut { throw SSHError.handshakeTimeout }
     }
 
     // TCP 已经 READY；本函数中的所有网络等待均受 establish() 的 watchdog 约束。
@@ -1011,66 +1066,74 @@ final class IntegratedSSHClient: @unchecked Sendable {
     func run(username: String, auth: SSHAuth, command: String, timeout: Double) async throws -> SSHRunResult {
         defer { connection.cancel() }
         try await establish(username: username, auth: auth, timeout: timeout)
-        let remoteChannel = try await openSessionChannel()
 
-        var exec = Data([Msg.channelRequest])
-        exec = IntegratedSSHWire.putUInt32(remoteChannel, into: exec)
-        exec = IntegratedSSHWire.putString("exec", into: exec)
-        exec.append(1)                                 // want_reply
-        exec = IntegratedSSHWire.putString(command, into: exec)
-        try await sendPacket(exec)
-
-        stage = "exec"
-        var output = Data()
-        var exitStatus: Int?
-        var sinceAdjust = 0
-
-        readLoop: while output.count < 4_000_000 {
-            let payload = try await nextPayload()
-            guard let code = payload.first else { continue }
-            var reader = IntegratedSSHWire.Reader(payload)
-            _ = reader.readByte()
-
-            switch code {
-            case Msg.channelData:
-                _ = reader.readUInt32()
-                if let chunk = reader.readString() {
-                    output.append(chunk)
-                    sinceAdjust += chunk.count
-                }
-            case Msg.channelExtData:
-                _ = reader.readUInt32()
-                _ = reader.readUInt32()                // data type (stderr)
-                if let chunk = reader.readString() { output.append(chunk) }
-            case Msg.channelRequest:
-                _ = reader.readUInt32()
-                let requestType = reader.readStringUTF8()
-                _ = reader.readByte()                  // want_reply
-                if requestType == "exit-status" { exitStatus = reader.readUInt32().map(Int.init) }
-            case Msg.channelEOF, Msg.channelWindowAdjust:
-                break
-            case Msg.channelClose:
-                var close = Data([Msg.channelClose])
-                close = IntegratedSSHWire.putUInt32(remoteChannel, into: close)
-                try? await sendPacket(close)
-                break readLoop
-            default:
-                break
-            }
-
-            if sinceAdjust >= 524_288 {
-                try await sendWindowAdjust(remoteChannel, UInt32(sinceAdjust))
-                sinceAdjust = 0
-            }
+        let remoteChannel = try await withHardDeadline(
+            seconds: 10.0,
+            timeoutError: .channelSetupTimeout
+        ) {
+            try await openSessionChannel()
         }
 
-        return SSHRunResult(
-            output: String(decoding: output, as: UTF8.self),
-            fingerprint: fingerprint,
-            hostKeyType: hostKeyTypeName,
-            hostKeyVerified: hostKeyVerified,
-            exitStatus: exitStatus
-        )
+        return try await withHardDeadline(seconds: 30.0, timeoutError: .execTimeout) {
+            var exec = Data([Msg.channelRequest])
+            exec = IntegratedSSHWire.putUInt32(remoteChannel, into: exec)
+            exec = IntegratedSSHWire.putString("exec", into: exec)
+            exec.append(1)                                 // want_reply
+            exec = IntegratedSSHWire.putString(command, into: exec)
+            try await sendPacket(exec)
+
+            stage = "exec"
+            var output = Data()
+            var exitStatus: Int?
+            var sinceAdjust = 0
+
+            readLoop: while output.count < 4_000_000 {
+                let payload = try await nextPayload()
+                guard let code = payload.first else { continue }
+                var reader = IntegratedSSHWire.Reader(payload)
+                _ = reader.readByte()
+
+                switch code {
+                case Msg.channelData:
+                    _ = reader.readUInt32()
+                    if let chunk = reader.readString() {
+                        output.append(chunk)
+                        sinceAdjust += chunk.count
+                    }
+                case Msg.channelExtData:
+                    _ = reader.readUInt32()
+                    _ = reader.readUInt32()                // data type (stderr)
+                    if let chunk = reader.readString() { output.append(chunk) }
+                case Msg.channelRequest:
+                    _ = reader.readUInt32()
+                    let requestType = reader.readStringUTF8()
+                    _ = reader.readByte()                  // want_reply
+                    if requestType == "exit-status" { exitStatus = reader.readUInt32().map(Int.init) }
+                case Msg.channelEOF, Msg.channelWindowAdjust:
+                    break
+                case Msg.channelClose:
+                    var close = Data([Msg.channelClose])
+                    close = IntegratedSSHWire.putUInt32(remoteChannel, into: close)
+                    try? await sendPacket(close)
+                    break readLoop
+                default:
+                    break
+                }
+
+                if sinceAdjust >= 524_288 {
+                    try await sendWindowAdjust(remoteChannel, UInt32(sinceAdjust))
+                    sinceAdjust = 0
+                }
+            }
+
+            return SSHRunResult(
+                output: String(decoding: output, as: UTF8.self),
+                fingerprint: fingerprint,
+                hostKeyType: hostKeyTypeName,
+                hostKeyVerified: hostKeyVerified,
+                exitStatus: exitStatus
+            )
+        }
     }
 
     // MARK: - Interactive shell (line oriented)
@@ -1080,32 +1143,40 @@ final class IntegratedSSHClient: @unchecked Sendable {
 // [ANNOTATION] 建立长连接 session，申请 xterm PTY 并请求 shell。当前 v1 固定 80×24，且是 line-oriented shell，不是完整终端模拟器。
     func openShell(username: String, auth: SSHAuth, timeout: Double) async throws {
         try await establish(username: username, auth: auth, timeout: timeout)
-        let channel = try await openSessionChannel()
-        shellChannel = channel
 
-        var pty = Data([Msg.channelRequest])
-        pty = IntegratedSSHWire.putUInt32(channel, into: pty)
-        pty = IntegratedSSHWire.putString("pty-req", into: pty)
-        pty.append(0)                                  // want_reply = false
-        pty = IntegratedSSHWire.putString("xterm", into: pty)
-        pty = IntegratedSSHWire.putUInt32(80, into: pty)              // columns
-        pty = IntegratedSSHWire.putUInt32(24, into: pty)              // rows
-        pty = IntegratedSSHWire.putUInt32(0, into: pty)               // width px
-        pty = IntegratedSSHWire.putUInt32(0, into: pty)               // height px
-        pty = IntegratedSSHWire.putString(Data([0]), into: pty)       // empty terminal modes (TTY_OP_END)
-        try await sendPacket(pty)
+        try await withHardDeadline(seconds: 10.0, timeoutError: .shellSetupTimeout) {
+            let channel = try await openSessionChannel()
+            shellChannel = channel
 
-        var shell = Data([Msg.channelRequest])
-        shell = IntegratedSSHWire.putUInt32(channel, into: shell)
-        shell = IntegratedSSHWire.putString("shell", into: shell)
-        shell.append(0)                                // want_reply = false
-        try await sendPacket(shell)
-        stage = "shell"
+            var pty = Data([Msg.channelRequest])
+            pty = IntegratedSSHWire.putUInt32(channel, into: pty)
+            pty = IntegratedSSHWire.putString("pty-req", into: pty)
+            pty.append(0)                                  // want_reply = false
+            pty = IntegratedSSHWire.putString("xterm", into: pty)
+            pty = IntegratedSSHWire.putUInt32(80, into: pty)              // columns
+            pty = IntegratedSSHWire.putUInt32(24, into: pty)              // rows
+            pty = IntegratedSSHWire.putUInt32(0, into: pty)               // width px
+            pty = IntegratedSSHWire.putUInt32(0, into: pty)               // height px
+            pty = IntegratedSSHWire.putString(Data([0]), into: pty)       // empty terminal modes (TTY_OP_END)
+            try await sendPacket(pty)
+
+            var shell = Data([Msg.channelRequest])
+            shell = IntegratedSSHWire.putUInt32(channel, into: shell)
+            shell = IntegratedSSHWire.putString("shell", into: shell)
+            shell.append(0)                                // want_reply = false
+            try await sendPacket(shell)
+            stage = "shell"
+        }
     }
 
     /// Blocks until the next chunk of shell output arrives; returns nil when
-    /// the channel closes. Called only from a single background reader task.
-// [ANNOTATION] 等待交互 shell 的下一块 stdout/stderr channel 数据；EOF/close 返回 nil，由上层结束读取循环。
+    /// the channel closes. Called only from a single reader task.
+    ///
+    /// Deliberately no short per-read wall-clock timeout: a quiet interactive
+    /// shell is valid. Its hard lifetime boundary is the app's foreground lease;
+    /// the UI/lifecycle owner must call close() immediately when foreground
+    /// authority is lost, and close() force-cancels the transport.
+// [ANNOTATION] 交互 shell 的静默不是超时错误；单次 read 由“前台生命周期”而不是短秒数界限约束。App 失活必须立即调用 close()。
     func readShellChunk() async throws -> String? {
         guard shellChannel != nil else { return nil }
         while true {
@@ -1208,7 +1279,7 @@ final class IntegratedSSHClient: @unchecked Sendable {
                 try await writeRaw(lengthField + sealed)
                 encrypt = cipher
             } catch {
-                connection.cancel()
+                connection.forceCancel()
                 throw error
             }
         } else {
