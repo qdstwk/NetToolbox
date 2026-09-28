@@ -116,7 +116,8 @@ struct PTZSection: View {
                     .foregroundStyle(theme.danger)
             }
         }
-        .task { await controller.prepare() }
+        // No automatic ONVIF request on view appearance. PTZ networking starts
+        // only from an explicit user control below.
     }
 
     private var directionPad: some View {
