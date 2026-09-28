@@ -1,0 +1,889 @@
+import SwiftUI
+import Foundation
+
+private enum PrivateTailnetSSHMode: String, CaseIterable, Identifiable {
+    case exec = "Command"
+    case shell = "Shell"
+
+    var id: String { rawValue }
+}
+
+private enum PrivateTailnetSSHProfilePersistence {
+    static let key = "privateTailnetSSH.profiles.v1"
+
+    static func load() -> [SSHConnectionProfile] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([SSHConnectionProfile].self, from: data)
+        else {
+            return []
+        }
+
+        // Fail closed on stale/invalid profile records. v1 UI supports only
+        // canonical 100.64.0.0/10 IPv4 and fixed SSH port 22.
+        return decoded.filter {
+            $0.port == 22 &&
+            SSHTailnetDestinationPolicy.allows($0.host) &&
+            SSHTailnetDestinationPolicy.canonicalIPv4($0.host) == $0.host &&
+            !$0.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    static func save(_ profiles: [SSHConnectionProfile]) {
+        guard let data = try? JSONEncoder().encode(profiles) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
+
+    @State private var profiles: [SSHConnectionProfile]
+    @State private var selectedProfileID: UUID?
+
+    @State private var showProfileEditor = false
+    @State private var editingProfileID: UUID?
+    @State private var editLabel = ""
+    @State private var editHost = ""
+    @State private var editUsername = ""
+    @State private var profileEditorError = ""
+
+    @State private var pendingHostKey: PinnedSSHHostKey?
+    @State private var showResetPinConfirmation = false
+    @State private var showDeleteProfileConfirmation = false
+
+    @State private var mode: PrivateTailnetSSHMode = .exec
+    @State private var password = ""
+    @State private var command = ""
+    @State private var execOutput = ""
+    @State private var execExitStatus: Int?
+
+    @State private var shellTranscript = ""
+    @State private var shellInput = ""
+    @State private var shellConnected = false
+    @State private var shellReadTask: Task<Void, Never>?
+
+    @State private var activeClient: IntegratedSSHClient?
+    @State private var isBusy = false
+    @State private var status = "Select or add a saved Tailnet host. No network connection starts automatically."
+
+    init() {
+        let loaded = PrivateTailnetSSHProfilePersistence.load()
+        _profiles = State(initialValue: loaded)
+        _selectedProfileID = State(initialValue: loaded.first?.id)
+    }
+
+    private var selectedProfile: SSHConnectionProfile? {
+        guard let selectedProfileID else { return nil }
+        return profiles.first(where: { $0.id == selectedProfileID })
+    }
+
+    private var controlsLocked: Bool {
+        isBusy || shellConnected
+    }
+
+    var body: some View {
+        NavigationSplitView {
+            List(selection: $selectedProfileID) {
+                Section("Saved Tailnet hosts") {
+                    if profiles.isEmpty {
+                        Text("No saved hosts")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(profiles) { profile in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(profile.label.isEmpty ? profile.host : profile.label)
+                                Text("\(profile.username)@\(profile.host):22")
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .tag(profile.id)
+                        }
+                    }
+                }
+            }
+            .disabled(controlsLocked)
+            .navigationTitle("PrivateTailnetSSH")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        beginAddProfile()
+                    } label: {
+                        Label("Add host", systemImage: "plus")
+                    }
+                    .disabled(controlsLocked)
+                }
+            }
+        } detail: {
+            if let profile = selectedProfile {
+                sessionView(profile)
+            } else {
+                ContentUnavailableView(
+                    "No host selected",
+                    systemImage: "terminal",
+                    description: Text("Add a Tailnet host profile. Saving/selecting a profile never opens a network connection.")
+                )
+            }
+        }
+        .sheet(isPresented: $showProfileEditor) {
+            profileEditor
+        }
+        .confirmationDialog(
+            "Reset saved Host Key pin?",
+            isPresented: $showResetPinConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Host Key pin", role: .destructive) {
+                resetSelectedPin()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("After reset, password entry is blocked until the server Host Key is verified and explicitly trusted again.")
+        }
+        .confirmationDialog(
+            "Delete this host profile?",
+            isPresented: $showDeleteProfileConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete host", role: .destructive) {
+                deleteSelectedProfile()
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .onChange(of: selectedProfileID) { _, _ in
+            clearTransientStateForProfileChange()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase != .active else { return }
+            forceLocalShutdown(
+                "DISCONNECTED: app left the active foreground. SSH transport was force-closed; password and transient trust state were cleared."
+            )
+        }
+        .onDisappear {
+            forceLocalShutdown("DISCONNECTED: PrivateTailnetSSH view closed.")
+        }
+    }
+
+    @ViewBuilder
+    private func sessionView(_ profile: SSHConnectionProfile) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header(profile)
+                profileSecurityCard(profile)
+                operationCard(profile)
+                statusCard
+
+                if mode == .exec, !execOutput.isEmpty || execExitStatus != nil {
+                    execResultCard
+                }
+
+                if mode == .shell {
+                    shellCard(profile)
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: 900)
+            .frame(maxWidth: .infinity, alignment: .top)
+        }
+        .navigationTitle(profile.label.isEmpty ? profile.host : profile.label)
+    }
+
+    @ViewBuilder
+    private func header(_ profile: SSHConnectionProfile) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(profile.label.isEmpty ? profile.host : profile.label)
+                        .font(.title2.bold())
+                    Text("\(profile.username)@\(profile.host):22")
+                        .font(.body.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Menu {
+                    Button {
+                        beginEditProfile(profile)
+                    } label: {
+                        Label("Edit profile", systemImage: "pencil")
+                    }
+
+                    if profile.pinnedHostKey != nil {
+                        Button(role: .destructive) {
+                            showResetPinConfirmation = true
+                        } label: {
+                            Label("Reset Host Key pin", systemImage: "key.slash")
+                        }
+                    }
+
+                    Button(role: .destructive) {
+                        showDeleteProfileConfirmation = true
+                    } label: {
+                        Label("Delete profile", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.title3)
+                }
+                .disabled(controlsLocked)
+            }
+
+            Text("v1 network scope: canonical Tailnet IPv4 only · SSH port 22 fixed · no auto-connect · foreground only")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func profileSecurityCard(_ profile: SSHConnectionProfile) -> some View {
+        GroupBox("Server identity") {
+            VStack(alignment: .leading, spacing: 12) {
+                if let pin = profile.pinnedHostKey {
+                    Label("Exact Host Key pin saved", systemImage: "checkmark.shield.fill")
+                        .foregroundStyle(.green)
+                    Text(pin.keyType)
+                        .font(.caption.monospaced())
+                    Text(pin.fingerprint)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+
+                    Text("Every real-password connection must match this exact host+port+key type+key blob before user authentication.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label("No trusted Host Key yet", systemImage: "exclamationmark.shield")
+                        .foregroundStyle(.orange)
+
+                    Text("Password entry stays disabled. Verify the server identity first; the preflight uses a non-secret sentinel and must stop before password authentication.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Button {
+                        Task { await verifyFirstUseHostKey(profile) }
+                    } label: {
+                        Label("Verify Host Key", systemImage: "checkmark.shield")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isBusy || shellConnected)
+                }
+
+                if let pendingHostKey {
+                    Divider()
+                    Label("Verified first-use Host Key — explicit trust required", systemImage: "key.fill")
+                        .foregroundStyle(.orange)
+                    Text(pendingHostKey.keyType)
+                        .font(.caption.monospaced())
+                    Text(pendingHostKey.fingerprint)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+
+                    HStack {
+                        Button {
+                            trustPendingHostKey(profile)
+                        } label: {
+                            Label("Trust & save exact key", systemImage: "checkmark.seal.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Discard", role: .cancel) {
+                            self.pendingHostKey = nil
+                            status = "First-use Host Key was not trusted. Password entry remains blocked."
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .disabled(isBusy || shellConnected)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func operationCard(_ profile: SSHConnectionProfile) -> some View {
+        GroupBox("Connection") {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Mode", selection: $mode) {
+                    ForEach(PrivateTailnetSSHMode.allCases) { item in
+                        Text(item.rawValue).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(shellConnected || isBusy)
+
+                SecureField("SSH password — transient, local only", text: $password)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.password)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+                    .disabled(profile.pinnedHostKey == nil || controlsLocked)
+
+                Text("The password is never persisted in the profile. It is cleared from UI state before network authentication begins and again on completion/background/disconnect. Swift String memory is not formally zeroizable.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if mode == .exec {
+                    TextField("Command", text: $command, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.body.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .disabled(controlsLocked)
+                        .lineLimit(1...4)
+
+                    Button {
+                        Task { await runExec(profile) }
+                    } label: {
+                        Label(isBusy ? "Running…" : "Run command", systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        profile.pinnedHostKey == nil ||
+                        password.isEmpty ||
+                        command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        controlsLocked
+                    )
+                } else if !shellConnected {
+                    Button {
+                        Task { await connectShell(profile) }
+                    } label: {
+                        Label(isBusy ? "Connecting…" : "Connect shell", systemImage: "terminal")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        profile.pinnedHostKey == nil ||
+                        password.isEmpty ||
+                        controlsLocked
+                    )
+                }
+
+                if isBusy {
+                    ProgressView()
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var statusCard: some View {
+        GroupBox("Status") {
+            Text(status)
+                .font(.body.monospaced())
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var execResultCard: some View {
+        GroupBox("Command result") {
+            VStack(alignment: .leading, spacing: 10) {
+                if let execExitStatus {
+                    Text("exit-status: \(execExitStatus)")
+                        .font(.caption.monospaced())
+                }
+
+                ScrollView(.horizontal) {
+                    Text(execOutput.isEmpty ? "(no stdout/stderr text returned)" : execOutput)
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func shellCard(_ profile: SSHConnectionProfile) -> some View {
+        GroupBox("Interactive shell") {
+            VStack(alignment: .leading, spacing: 12) {
+                ScrollView {
+                    Text(shellTranscript.isEmpty ? "(shell connected; waiting for output)" : shellTranscript)
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .frame(minHeight: 260, maxHeight: 520)
+                .padding(10)
+                .background(.black.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+
+                if shellConnected {
+                    HStack {
+                        TextField("Shell input", text: $shellInput)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                            .onSubmit {
+                                Task { await sendShellLine() }
+                            }
+
+                        Button {
+                            Task { await sendShellLine() }
+                        } label: {
+                            Image(systemName: "return")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(shellInput.isEmpty)
+                    }
+
+                    Button("Disconnect shell", role: .destructive) {
+                        disconnectShell(reason: "Shell disconnected by user.")
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Text("No shell session is active.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var profileEditor: some View {
+        NavigationStack {
+            Form {
+                Section("Saved host") {
+                    TextField("Label", text: $editLabel)
+                    TextField("Tailnet IPv4", text: $editHost)
+                        .font(.body.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .keyboardType(.numbersAndPunctuation)
+                    TextField("Username", text: $editUsername)
+                        .font(.body.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+
+                    LabeledContent("SSH port", value: "22 (fixed in v1)")
+                }
+
+                Section {
+                    Text("Profiles persist only label, canonical Tailnet IPv4, port 22, username and the exact Host Key pin. Passwords are never saved.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !profileEditorError.isEmpty {
+                    Section {
+                        Text(profileEditorError)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle(editingProfileID == nil ? "Add host" : "Edit host")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        showProfileEditor = false
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        saveProfileEditor()
+                    }
+                }
+            }
+        }
+    }
+
+    private func beginAddProfile() {
+        editingProfileID = nil
+        editLabel = ""
+        editHost = ""
+        editUsername = ""
+        profileEditorError = ""
+        showProfileEditor = true
+    }
+
+    private func beginEditProfile(_ profile: SSHConnectionProfile) {
+        editingProfileID = profile.id
+        editLabel = profile.label
+        editHost = profile.host
+        editUsername = profile.username
+        profileEditorError = ""
+        showProfileEditor = true
+    }
+
+    private func saveProfileEditor() {
+        let trimmedHost = editHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedUser = editUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedLabel = editLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard SSHTailnetDestinationPolicy.allows(trimmedHost),
+              let canonical = SSHTailnetDestinationPolicy.canonicalIPv4(trimmedHost),
+              canonical == trimmedHost
+        else {
+            profileEditorError = "Host must be a canonical Tailnet IPv4 address in 100.64.0.0/10. DNS, MagicDNS, IPv6, LAN and public IPv4 are rejected in v1."
+            return
+        }
+
+        guard !trimmedUser.isEmpty else {
+            profileEditorError = "Username is required."
+            return
+        }
+
+        let label = trimmedLabel.isEmpty ? canonical : trimmedLabel
+
+        if let editingProfileID,
+           let index = profiles.firstIndex(where: { $0.id == editingProfileID }) {
+            let old = profiles[index]
+            let preservePin = old.host == canonical && old.port == 22
+            profiles[index] = SSHConnectionProfile(
+                id: old.id,
+                label: label,
+                host: canonical,
+                port: 22,
+                username: trimmedUser,
+                pinnedHostKey: preservePin ? old.pinnedHostKey : nil
+            )
+            selectedProfileID = old.id
+
+            if !preservePin {
+                pendingHostKey = nil
+                password = ""
+                status = "Host address changed. Previous Host Key pin was cleared; verify and explicitly trust the new server identity before authentication."
+            }
+        } else {
+            let profile = SSHConnectionProfile(
+                label: label,
+                host: canonical,
+                port: 22,
+                username: trimmedUser,
+                pinnedHostKey: nil
+            )
+            profiles.insert(profile, at: 0)
+            selectedProfileID = profile.id
+            status = "Host profile saved. No network connection was opened. Verify the Host Key before entering a password."
+        }
+
+        PrivateTailnetSSHProfilePersistence.save(profiles)
+        showProfileEditor = false
+    }
+
+    private func deleteSelectedProfile() {
+        guard let selectedProfileID else { return }
+        forceLocalShutdown("Profile deleted. Any active transport was force-closed.")
+        profiles.removeAll { $0.id == selectedProfileID }
+        PrivateTailnetSSHProfilePersistence.save(profiles)
+        self.selectedProfileID = profiles.first?.id
+    }
+
+    private func resetSelectedPin() {
+        guard let selectedProfileID,
+              let index = profiles.firstIndex(where: { $0.id == selectedProfileID })
+        else { return }
+
+        forceLocalShutdown("Host Key pin reset. Password entry is blocked until first-use verification and explicit trust are completed again.")
+        profiles[index].pinnedHostKey = nil
+        PrivateTailnetSSHProfilePersistence.save(profiles)
+        pendingHostKey = nil
+        password = ""
+    }
+
+    @MainActor
+    private func verifyFirstUseHostKey(_ profile: SSHConnectionProfile) async {
+        guard profile.pinnedHostKey == nil else {
+            status = "This profile already has an exact Host Key pin."
+            return
+        }
+
+        isBusy = true
+        pendingHostKey = nil
+        password = ""
+        status = "Verifying SSH Host Key signature/possession. Real password authentication is not permitted in this step."
+
+        guard let client = IntegratedSSHClient(
+            host: profile.host,
+            port: profile.port,
+            pinnedHostKey: nil
+        ) else {
+            isBusy = false
+            status = "FAIL: destination was rejected before TCP connect."
+            return
+        }
+
+        activeClient = client
+        defer {
+            client.close()
+            if activeClient === client { activeClient = nil }
+            isBusy = false
+        }
+
+        do {
+            _ = try await client.run(
+                username: profile.username,
+                auth: .password("__PRIVATE_TAILNET_SSH_FIRST_USE_PREFLIGHT__"),
+                command: "true",
+                timeout: 10
+            )
+            status = "CRITICAL FAIL: first-use confirmation gate was bypassed. Do not enter a real password."
+        } catch SSHError.hostKeyConfirmationRequired(let key) {
+            guard key.host == profile.host,
+                  key.port == profile.port
+            else {
+                status = "HARD FAIL: verified Host Key was returned for an unexpected host/port binding."
+                return
+            }
+
+            pendingHostKey = key
+            status = "PASS: server Host Key signature/possession verified. Inspect the fingerprint and explicitly trust the exact key before password entry is enabled."
+        } catch SSHError.authFailed {
+            status = "CRITICAL FAIL: first-use sentinel reached password authentication. Do not enter a real password."
+        } catch {
+            status = "FAIL during Host Key preflight at Core stage \(client.stage): \(String(reflecting: error))"
+        }
+    }
+
+    private func trustPendingHostKey(_ profile: SSHConnectionProfile) {
+        guard let key = pendingHostKey,
+              key.host == profile.host,
+              key.port == profile.port,
+              let index = profiles.firstIndex(where: { $0.id == profile.id })
+        else {
+            status = "HARD FAIL: pending Host Key no longer matches the selected profile."
+            pendingHostKey = nil
+            return
+        }
+
+        profiles[index].pinnedHostKey = key
+        PrivateTailnetSSHProfilePersistence.save(profiles)
+        pendingHostKey = nil
+        password = ""
+        status = "Exact Host Key pin saved locally. No SSH session is active. Enter the transient password only when you are ready to run a command or open a shell."
+    }
+
+    @MainActor
+    private func runExec(_ profile: SSHConnectionProfile) async {
+        guard let pin = profile.pinnedHostKey else {
+            status = "STOP: no exact Host Key pin is stored for this profile."
+            return
+        }
+
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCommand.isEmpty else {
+            status = "STOP: enter a command first."
+            return
+        }
+
+        guard !password.isEmpty else {
+            status = "STOP: enter the transient SSH password locally."
+            return
+        }
+
+        isBusy = true
+        execOutput = ""
+        execExitStatus = nil
+
+        let enteredPassword = password
+        password = ""
+
+        guard let client = IntegratedSSHClient(
+            host: profile.host,
+            port: profile.port,
+            pinnedHostKey: pin
+        ) else {
+            isBusy = false
+            status = "FAIL: destination was rejected before TCP connect."
+            return
+        }
+
+        activeClient = client
+        status = "Connecting to the exact pinned Host Key and running one command…"
+
+        defer {
+            client.close()
+            if activeClient === client { activeClient = nil }
+            password = ""
+            isBusy = false
+        }
+
+        do {
+            let result = try await client.run(
+                username: profile.username,
+                auth: .password(enteredPassword),
+                command: trimmedCommand,
+                timeout: 10
+            )
+
+            guard result.hostKeyVerified,
+                  result.hostKeyType == pin.keyType,
+                  result.fingerprint == pin.fingerprint
+            else {
+                status = "CRITICAL FAIL: command returned without the expected verified Host Key identity."
+                return
+            }
+
+            execOutput = result.output
+            execExitStatus = result.exitStatus
+            status = "PASS: command completed after exact Host Key verification and real-password authentication. Transport closed."
+        } catch SSHError.hostKeyChanged {
+            status = "HARD FAIL: Host Key changed. Password authentication/command execution was blocked. Do not accept a replacement key from this error path; reset the saved pin only after independent verification."
+        } catch SSHError.authFailed {
+            status = "FAIL: server rejected password authentication. Password field was cleared."
+        } catch SSHError.execTimeout {
+            status = "FAIL: exec exceeded the hard deadline; transport was force-closed."
+        } catch SSHError.concurrentSession {
+            status = "FAIL CLOSED: another SSH session is already active."
+        } catch {
+            status = "FAIL at Core stage \(client.stage): \(String(reflecting: error))"
+        }
+    }
+
+    @MainActor
+    private func connectShell(_ profile: SSHConnectionProfile) async {
+        guard let pin = profile.pinnedHostKey else {
+            status = "STOP: no exact Host Key pin is stored for this profile."
+            return
+        }
+
+        guard !password.isEmpty else {
+            status = "STOP: enter the transient SSH password locally."
+            return
+        }
+
+        isBusy = true
+        shellTranscript = ""
+        shellInput = ""
+
+        let enteredPassword = password
+        password = ""
+
+        guard let client = IntegratedSSHClient(
+            host: profile.host,
+            port: profile.port,
+            pinnedHostKey: pin
+        ) else {
+            isBusy = false
+            status = "FAIL: destination was rejected before TCP connect."
+            return
+        }
+
+        activeClient = client
+        status = "Opening one exact-pin authenticated PTY/shell session…"
+
+        do {
+            try await client.openShell(
+                username: profile.username,
+                auth: .password(enteredPassword),
+                timeout: 10
+            )
+
+            shellConnected = true
+            isBusy = false
+            status = "Shell connected. One reader task is active. Leaving the app foreground will force-disconnect immediately."
+            startShellReader(client)
+        } catch SSHError.hostKeyChanged {
+            client.close()
+            activeClient = nil
+            isBusy = false
+            status = "HARD FAIL: Host Key changed before shell authentication."
+        } catch SSHError.authFailed {
+            client.close()
+            activeClient = nil
+            isBusy = false
+            status = "FAIL: server rejected password authentication. Password field was cleared."
+        } catch SSHError.shellSetupTimeout {
+            client.close()
+            activeClient = nil
+            isBusy = false
+            status = "FAIL: PTY/shell setup exceeded the hard deadline; transport was force-closed."
+        } catch {
+            client.close()
+            activeClient = nil
+            isBusy = false
+            status = "FAIL during shell setup at Core stage \(client.stage): \(String(reflecting: error))"
+        }
+    }
+
+    @MainActor
+    private func startShellReader(_ client: IntegratedSSHClient) {
+        shellReadTask?.cancel()
+        shellReadTask = Task { @MainActor in
+            do {
+                while !Task.isCancelled {
+                    guard let chunk = try await client.readShellChunk() else { break }
+                    shellTranscript += chunk
+
+                    if shellTranscript.utf8.count > 262_144 {
+                        status = "FAIL CLOSED: shell transcript exceeded 256 KiB UI safety limit; transport was force-closed."
+                        client.close()
+                        break
+                    }
+                }
+            } catch {
+                if activeClient === client {
+                    status = "Shell reader ended: \(String(reflecting: error))"
+                }
+            }
+
+            if activeClient === client {
+                client.close()
+                activeClient = nil
+                shellConnected = false
+                password = ""
+                shellInput = ""
+                if !status.hasPrefix("FAIL CLOSED") {
+                    status = "Shell ended and transport closed."
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func sendShellLine() async {
+        guard shellConnected,
+              let client = activeClient
+        else {
+            status = "STOP: no shell session is active."
+            return
+        }
+
+        let line = shellInput
+        guard !line.isEmpty else { return }
+        shellInput = ""
+
+        do {
+            try await client.sendShell(line + "\n")
+        } catch {
+            status = "FAIL sending shell input: \(String(reflecting: error))"
+            disconnectShell(reason: "Shell transport closed after send failure.")
+        }
+    }
+
+    private func disconnectShell(reason: String) {
+        shellReadTask?.cancel()
+        shellReadTask = nil
+        activeClient?.close()
+        activeClient = nil
+        shellConnected = false
+        isBusy = false
+        password = ""
+        shellInput = ""
+        status = reason
+    }
+
+    private func forceLocalShutdown(_ reason: String) {
+        shellReadTask?.cancel()
+        shellReadTask = nil
+        activeClient?.close()
+        activeClient = nil
+        shellConnected = false
+        isBusy = false
+
+        password = ""
+        pendingHostKey = nil
+        shellInput = ""
+
+        status = reason
+    }
+
+    private func clearTransientStateForProfileChange() {
+        // Selection itself is never allowed to start a connection.
+        password = ""
+        pendingHostKey = nil
+        execOutput = ""
+        execExitStatus = nil
+        shellTranscript = ""
+        shellInput = ""
+        status = "Profile selected. No network connection started."
+    }
+}
