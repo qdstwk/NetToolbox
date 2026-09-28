@@ -1078,7 +1078,11 @@ final class IntegratedSSHClient: @unchecked Sendable {
         var serviceRequest = Data([Msg.serviceRequest])
         serviceRequest = IntegratedSSHWire.putString("ssh-userauth", into: serviceRequest)
         try await sendPacket(serviceRequest)
-        _ = try await expect(Msg.serviceAccept)
+        let serviceAccept = try await expect(Msg.serviceAccept)
+        var serviceReader = IntegratedSSHWire.Reader(serviceAccept)
+        _ = serviceReader.readByte()
+        guard serviceReader.readStringUTF8() == "ssh-userauth",
+              serviceReader.isAtEnd else { throw SSHError.protocolError }
         stage = "userauth"
         try await authenticate(username: username, auth: auth)
     }
@@ -1137,8 +1141,12 @@ final class IntegratedSSHClient: @unchecked Sendable {
         let confirm = try await expect(Msg.channelOpenConfirm)
         var reader = IntegratedSSHWire.Reader(confirm)
         _ = reader.readByte()
-        _ = reader.readUInt32()                        // our channel
-        guard let remote = reader.readUInt32() else { throw SSHError.channelFailed }
+        guard reader.readUInt32() == 0,                 // recipient must be our sole local channel
+              let remote = reader.readUInt32(),         // server's sender channel
+              reader.readUInt32() != nil,               // server initial window
+              let remoteMaxPacket = reader.readUInt32(),
+              remoteMaxPacket > 0,
+              reader.isAtEnd else { throw SSHError.channelFailed }
         return remote
     }
 
@@ -1181,27 +1189,48 @@ final class IntegratedSSHClient: @unchecked Sendable {
 
                 switch code {
                 case Msg.channelData:
-                    _ = reader.readUInt32()
-                    if let chunk = reader.readString() {
-                        output.append(chunk)
-                        sinceAdjust += chunk.count
-                    }
+                    guard reader.readUInt32() == 0,
+                          let chunk = reader.readString(),
+                          reader.isAtEnd else { throw SSHError.protocolError }
+                    output.append(chunk)
+                    sinceAdjust += chunk.count
+
                 case Msg.channelExtData:
-                    _ = reader.readUInt32()
-                    _ = reader.readUInt32()                // data type (stderr)
-                    if let chunk = reader.readString() { output.append(chunk) }
+                    guard reader.readUInt32() == 0,
+                          reader.readUInt32() != nil,       // data type (normally stderr = 1)
+                          let chunk = reader.readString(),
+                          reader.isAtEnd else { throw SSHError.protocolError }
+                    output.append(chunk)
+                    sinceAdjust += chunk.count
+
                 case Msg.channelRequest:
-                    _ = reader.readUInt32()
-                    let requestType = reader.readStringUTF8()
-                    _ = reader.readByte()                  // want_reply
-                    if requestType == "exit-status" { exitStatus = reader.readUInt32().map(Int.init) }
-                case Msg.channelEOF, Msg.channelWindowAdjust:
-                    break
+                    guard reader.readUInt32() == 0,
+                          let requestType = reader.readStringUTF8(),
+                          let wantReply = reader.readByte() else { throw SSHError.protocolError }
+                    if requestType == "exit-status" {
+                        guard let status = reader.readUInt32(), reader.isAtEnd else { throw SSHError.protocolError }
+                        exitStatus = Int(status)
+                    } else {
+                        // Unknown server->client channel requests are ignored only when
+                        // their remaining payload does not affect our state machine.
+                        _ = wantReply
+                    }
+
+                case Msg.channelEOF:
+                    guard reader.readUInt32() == 0, reader.isAtEnd else { throw SSHError.protocolError }
+
+                case Msg.channelWindowAdjust:
+                    guard reader.readUInt32() == 0,
+                          reader.readUInt32() != nil,
+                          reader.isAtEnd else { throw SSHError.protocolError }
+
                 case Msg.channelClose:
+                    guard reader.readUInt32() == 0, reader.isAtEnd else { throw SSHError.protocolError }
                     var close = Data([Msg.channelClose])
                     close = IntegratedSSHWire.putUInt32(remoteChannel, into: close)
                     try? await sendPacket(close)
                     break readLoop
+
                 default:
                     break
                 }
@@ -1280,14 +1309,31 @@ final class IntegratedSSHClient: @unchecked Sendable {
                 var reader = IntegratedSSHWire.Reader(payload)
                 _ = reader.readByte()
                 switch code {
-                case Msg.channelData, Msg.channelExtData:
-                    if code == Msg.channelExtData { _ = reader.readUInt32() }
-                    _ = reader.readUInt32()
-                    if let chunk = reader.readString() { return String(decoding: chunk, as: UTF8.self) }
+                case Msg.channelData:
+                    guard reader.readUInt32() == 0,
+                          let chunk = reader.readString(),
+                          reader.isAtEnd else { throw SSHError.protocolError }
+                    return String(decoding: chunk, as: UTF8.self)
+
+                case Msg.channelExtData:
+                    guard reader.readUInt32() == 0,
+                          reader.readUInt32() != nil,
+                          let chunk = reader.readString(),
+                          reader.isAtEnd else { throw SSHError.protocolError }
+                    return String(decoding: chunk, as: UTF8.self)
+
                 case Msg.channelClose, Msg.channelEOF:
+                    guard reader.readUInt32() == 0, reader.isAtEnd else { throw SSHError.protocolError }
                     shellChannel = nil
                     close()
                     return nil
+
+                case Msg.channelWindowAdjust:
+                    guard reader.readUInt32() == 0,
+                          reader.readUInt32() != nil,
+                          reader.isAtEnd else { throw SSHError.protocolError }
+                    continue
+
                 default:
                     continue
                 }
