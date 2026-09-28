@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     // Phase 1 only: discover and display the server Host Key.
     // The Core must throw hostKeyConfirmationRequired BEFORE authentication,
     // so this placeholder must never be transmitted on a first-use connection.
@@ -12,6 +13,7 @@ struct ContentView: View {
     @State private var fingerprint = ""
     @State private var keyType = ""
     @State private var isRunning = false
+    @State private var activeClient: IntegratedSSHClient?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -45,6 +47,13 @@ struct ContentView: View {
             Spacer()
         }
         .padding(24)
+        .onChange(of: scenePhase) { _, phase in
+            guard phase != .active else { return }
+            activeClient?.close()
+            activeClient = nil
+            isRunning = false
+            status = "CANCELLED: app left the active foreground; SSH transport was force-closed."
+        }
         .frame(minWidth: 620, minHeight: 360)
     }
 
@@ -66,7 +75,11 @@ struct ContentView: View {
             return
         }
 
-        defer { client.close() }
+        activeClient = client
+        defer {
+            client.close()
+            activeClient = nil
+        }
 
         do {
             _ = try await client.run(
