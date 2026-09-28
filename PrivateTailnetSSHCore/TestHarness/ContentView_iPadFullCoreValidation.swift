@@ -59,6 +59,7 @@ struct ContentView: View {
 
                 SecureField("HP-NAS SSH password — local only", text: $password)
                     .textFieldStyle(.roundedBorder)
+                    .textContentType(.password)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
                     .disabled(verifiedPin == nil || isRunning)
@@ -278,8 +279,14 @@ struct ContentView: View {
                 timeout: 10
             )
         } catch SSHError.authFailed {
+            let methods = execClient.lastAuthMethods.isEmpty
+                ? "(server returned no continuation method)"
+                : execClient.lastAuthMethods.joined(separator: ",")
+            let partial = execClient.lastAuthPartialSuccess
+                .map { $0 ? "true" : "false" } ?? "unknown"
+
             status = """
-            FAIL: HP-NAS rejected the password on iPadOS before exec began.
+            AUTH DIAGNOSTIC: server returned SSH_MSG_USERAUTH_FAILURE before exec.
 
             Exact Host Key / trusted reconnect:
             PASS
@@ -287,8 +294,18 @@ struct ContentView: View {
             Core stage:
             userauth
 
+            Server methods that may continue:
+            \(methods)
+
+            RFC 4252 partial success:
+            \(partial)
+
             No exec command was accepted.
-            Re-enter the password locally; the field has already been cleared.
+            Password field has been cleared.
+
+            Interpretation:
+            partial=true  → password step succeeded but another auth factor is required.
+            partial=false → this password request was not accepted; next check is HP-NAS sshd/PAM log + exact local input.
             """
             return
         } catch SSHError.hostKeyChanged {
