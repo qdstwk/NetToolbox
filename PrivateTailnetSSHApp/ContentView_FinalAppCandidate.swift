@@ -123,30 +123,39 @@ private struct PrivateTailnetSSHAppKeyboard: View {
     @State private var page: Page = .letters
     @State private var shifted = false
 
+    private let lowercaseRows: [[String]] = [
+        ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+        ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
+        ["z", "x", "c", "v", "b", "n", "m"]
+    ]
+
+    private let uppercaseRows: [[String]] = [
+        ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+        ["A", "S", "D", "F", "G", "H", "J", "K", "L"],
+        ["Z", "X", "C", "V", "B", "N", "M"]
+    ]
+
+    private let numberRows: [[String]] = [
+        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+        ["-", "_", ".", "/", ":", "@", "~", "$", "&", "|"],
+        ["(", ")", "[", "]", "{", "}", "+", "=", "*", "?"]
+    ]
+
+    private let symbolRows: [[String]] = [
+        ["!", "\"", "#", "$", "%", "&", "'", "(", ")", "*"],
+        ["+", ",", "-", ".", "/", ":", ";", "<", "=", ">"],
+        ["?", "@", "[", "\\", "]", "^", "_", "`", "{", "|"],
+        ["}", "~"]
+    ]
+
     private var rows: [[String]] {
         switch page {
         case .letters:
-            let base = [
-                ["q","w","e","r","t","y","u","i","o","p"],
-                ["a","s","d","f","g","h","j","k","l"],
-                ["z","x","c","v","b","n","m"]
-            ]
-            return shifted ? base.map { $0.map { $0.uppercased() } } : base
-
+            return shifted ? uppercaseRows : lowercaseRows
         case .numbers:
-            return [
-                ["1","2","3","4","5","6","7","8","9","0"],
-                ["-","_",".","/",":","@","~","$","&","|"],
-                ["(",")","[","]","{","}","+","=","*","?"]
-            ]
-
+            return numberRows
         case .symbols:
-            return [
-                ["!","\"","#","$","%","&","'","(",")","*"],
-                ["+",",","-",".","/",":",";","<","=",">"],
-                ["?","@","[","\\","]","^","_",String(UnicodeScalar(96)!),"{","|"],
-                ["}","~"]
-            ]
+            return symbolRows
         }
     }
 
@@ -243,7 +252,7 @@ private enum PrivateTailnetSSHProfilePersistence {
     private static let account = "profiles"
 
     static func load() -> [SSHConnectionProfile] {
-        var query: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
