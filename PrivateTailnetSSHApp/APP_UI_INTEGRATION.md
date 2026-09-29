@@ -115,10 +115,10 @@ Validated on iPadOS Swift Playgrounds against HP-NAS:
 - Final-UI shell input / user exit / clean close: PASS
 - Foreground loss immediate force-close after direct UIKit lifecycle guard: PASS
 - Final-UI exec: exact pin + real password + stdout + exit-status + clean close: PASS
+- Relaunch persistence after Keychain migration: profile + exact Host Key pin restored; password not restored; no auto-connect: PASS
 
 Still open before UI freeze:
 
-- Relaunch persistence: profile + exact Host Key pin must restore; password must not restore
 - Invalid/non-Tailnet destination rejection
 - Pin reset/delete behavior
 - Single-session rejection while one session is active
@@ -136,4 +136,4 @@ Security boundary remains unchanged:
 - the trust database is device-local and intentionally non-synchronizing;
 - frozen Core is unchanged.
 
-The relaunch persistence test must be rerun before this item can PASS.
+Relaunch persistence was rerun on iPadOS after the Keychain migration and PASS: profile + exact Host Key pin restored, password did not restore, and the app did not auto-connect.
