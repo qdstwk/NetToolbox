@@ -117,11 +117,12 @@ Validated on iPadOS Swift Playgrounds against HP-NAS:
 - Final-UI exec: exact pin + real password + stdout + exit-status + clean close: PASS
 - Relaunch persistence after Keychain migration: profile + exact Host Key pin restored; password not restored; no auto-connect: PASS
 - Destination/profile gate: RFC1918 LAN IPv4, public IPv4 and non-canonical Tailnet IPv4 with leading zero were rejected before profile creation: PASS
+- Host Key pin reset: reset removed the saved exact pin, re-disabled password entry, did not auto-connect, and required a fresh first-use verify + explicit trust before password entry was re-enabled: PASS
 
 Still open before UI freeze:
 
-- Pin reset/delete behavior
-- Single-session rejection while one session is active
+- Profile delete persistence
+- Single-session / second-session prevention while one session is active
 
 
 ## Persistence finding after first relaunch test
