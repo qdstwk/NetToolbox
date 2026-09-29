@@ -5,6 +5,68 @@ import Combine
 import UIKit
 #endif
 
+
+#if canImport(UIKit)
+/// Process-level foreground kill switch for the one active SSH transport.
+///
+/// This does not wait for SwiftUI view updates. UIKit lifecycle notifications
+/// are delivered synchronously to this observer (queue: nil), and the current
+/// transport is force-closed inside that notification callback.
+private final class PrivateTailnetSSHForegroundGuard: @unchecked Sendable {
+    static let shared = PrivateTailnetSSHForegroundGuard()
+
+    private let lock = NSLock()
+    private var client: IntegratedSSHClient?
+    private var observers: [NSObjectProtocol] = []
+
+    private init() {
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [
+            UIScene.willDeactivateNotification,
+            UIApplication.willResignActiveNotification,
+            UIScene.didEnterBackgroundNotification,
+            UIApplication.didEnterBackgroundNotification
+        ]
+
+        observers = names.map { name in
+            center.addObserver(
+                forName: name,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.forceCloseImmediately()
+            }
+        }
+    }
+
+    func arm(_ client: IntegratedSSHClient) {
+        lock.lock()
+        self.client = client
+        lock.unlock()
+    }
+
+    func disarm(_ client: IntegratedSSHClient) {
+        lock.lock()
+        if self.client === client {
+            self.client = nil
+        }
+        lock.unlock()
+    }
+
+    func forceCloseImmediately() {
+        lock.lock()
+        let client = self.client
+        self.client = nil
+        lock.unlock()
+
+        // NWConnection cancellation happens here, synchronously with the
+        // lifecycle callback. UI cleanup may render later, but the network
+        // authority is already revoked.
+        client?.close()
+    }
+}
+#endif
+
 private enum PrivateTailnetSSHMode: String, CaseIterable, Identifiable {
     case exec = "Command"
     case shell = "Shell"
@@ -623,7 +685,16 @@ struct ContentView: View {
         }
 
         activeClient = client
+#if canImport(UIKit)
+        PrivateTailnetSSHForegroundGuard.shared.arm(client)
+#endif
         defer {
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
             client.close()
             if activeClient === client { activeClient = nil }
             isBusy = false
@@ -708,9 +779,18 @@ struct ContentView: View {
         }
 
         activeClient = client
+#if canImport(UIKit)
+        PrivateTailnetSSHForegroundGuard.shared.arm(client)
+#endif
         status = "Connecting to the exact pinned Host Key and running one command…"
 
         defer {
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
             client.close()
             if activeClient === client { activeClient = nil }
             password = ""
@@ -779,6 +859,9 @@ struct ContentView: View {
         }
 
         activeClient = client
+#if canImport(UIKit)
+        PrivateTailnetSSHForegroundGuard.shared.arm(client)
+#endif
         status = "Opening one exact-pin authenticated PTY/shell session…"
 
         do {
@@ -793,21 +876,45 @@ struct ContentView: View {
             status = "Shell connected. One reader task is active. Leaving the app foreground will force-disconnect immediately."
             startShellReader(client)
         } catch SSHError.hostKeyChanged {
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
             client.close()
             activeClient = nil
             isBusy = false
             status = "HARD FAIL: Host Key changed before shell authentication."
         } catch SSHError.authFailed {
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
             client.close()
             activeClient = nil
             isBusy = false
             status = "FAIL: server rejected password authentication. Password field was cleared."
         } catch SSHError.shellSetupTimeout {
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
             client.close()
             activeClient = nil
             isBusy = false
             status = "FAIL: PTY/shell setup exceeded the hard deadline; transport was force-closed."
         } catch {
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
             client.close()
             activeClient = nil
             isBusy = false
@@ -826,7 +933,13 @@ struct ContentView: View {
 
                     if shellTranscript.utf8.count > 262_144 {
                         status = "FAIL CLOSED: shell transcript exceeded 256 KiB UI safety limit; transport was force-closed."
-                        client.close()
+            #if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
+            client.close()
                         break
                     }
                 }
@@ -837,7 +950,13 @@ struct ContentView: View {
             }
 
             if activeClient === client {
-                client.close()
+    #if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
+#if canImport(UIKit)
+            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
+#endif
+            client.close()
                 activeClient = nil
                 shellConnected = false
                 password = ""
@@ -873,7 +992,11 @@ struct ContentView: View {
     private func disconnectShell(reason: String) {
         shellReadTask?.cancel()
         shellReadTask = nil
+#if canImport(UIKit)
+        PrivateTailnetSSHForegroundGuard.shared.forceCloseImmediately()
+#else
         activeClient?.close()
+#endif
         activeClient = nil
         shellConnected = false
         isBusy = false
@@ -896,7 +1019,11 @@ struct ContentView: View {
     private func forceLocalShutdown(_ reason: String) {
         shellReadTask?.cancel()
         shellReadTask = nil
+#if canImport(UIKit)
+        PrivateTailnetSSHForegroundGuard.shared.forceCloseImmediately()
+#else
         activeClient?.close()
+#endif
         activeClient = nil
         shellConnected = false
         isBusy = false
