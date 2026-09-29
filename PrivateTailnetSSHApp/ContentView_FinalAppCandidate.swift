@@ -75,6 +75,164 @@ private enum PrivateTailnetSSHMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+private enum PrivateTailnetSSHAppKeyboardTarget: String {
+    case profileLabel
+    case profileHost
+    case profileUsername
+    case password
+    case command
+    case shellInput
+
+    var title: String {
+        switch self {
+        case .profileLabel: return "Label"
+        case .profileHost: return "Tailnet IPv4"
+        case .profileUsername: return "Username"
+        case .password: return "SSH password"
+        case .command: return "Command"
+        case .shellInput: return "Shell input"
+        }
+    }
+
+    var belongsToProfileEditor: Bool {
+        switch self {
+        case .profileLabel, .profileHost, .profileUsername: return true
+        case .password, .command, .shellInput: return false
+        }
+    }
+}
+
+/// App-owned fallback keyboard for Swift Playgrounds App Preview.
+///
+/// It never reads hardware/system keyboard events and never touches the
+/// clipboard. Each key is an ordinary SwiftUI Button that mutates only the
+/// selected in-memory field.
+private struct PrivateTailnetSSHAppKeyboard: View {
+    private enum Page {
+        case letters
+        case numbers
+        case symbols
+    }
+
+    let targetTitle: String
+    let append: (String) -> Void
+    let backspace: () -> Void
+    let clear: () -> Void
+    let dismiss: () -> Void
+
+    @State private var page: Page = .letters
+    @State private var shifted = false
+
+    private var rows: [[String]] {
+        switch page {
+        case .letters:
+            let base = [
+                ["q","w","e","r","t","y","u","i","o","p"],
+                ["a","s","d","f","g","h","j","k","l"],
+                ["z","x","c","v","b","n","m"]
+            ]
+            return shifted ? base.map { $0.map { $0.uppercased() } } : base
+
+        case .numbers:
+            return [
+                ["1","2","3","4","5","6","7","8","9","0"],
+                ["-","_",".","/",":","@","~","$","&","|"],
+                ["(",")","[","]","{","}","+","=","*","?"]
+            ]
+
+        case .symbols:
+            return [
+                ["!","\"","#","$","%","&","'","(",")","*"],
+                ["+",",","-",".","/",":",";","<","=",">"],
+                ["?","@","[","\\","]","^","_",String(UnicodeScalar(96)!),"{","|"],
+                ["}","~"]
+            ]
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Image(systemName: "keyboard")
+                Text("App Keyboard · \(targetTitle)")
+                    .font(.headline)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonStyle(.bordered)
+            }
+
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 6) {
+                    ForEach(Array(row.enumerated()), id: \.offset) { _, key in
+                        Button {
+                            append(key)
+                            if shifted && page == .letters {
+                                shifted = false
+                            }
+                        } label: {
+                            Text(key)
+                                .font(.body.monospaced())
+                                .frame(maxWidth: .infinity, minHeight: 38)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+
+            HStack(spacing: 6) {
+                Button {
+                    shifted.toggle()
+                    page = .letters
+                } label: {
+                    Image(systemName: shifted ? "shift.fill" : "shift")
+                        .frame(minWidth: 34, minHeight: 36)
+                }
+                .buttonStyle(.bordered)
+
+                Button("ABC") {
+                    page = .letters
+                    shifted = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("123") {
+                    page = .numbers
+                    shifted = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("#+=") {
+                    page = .symbols
+                    shifted = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("Space") { append(" ") }
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
+
+                Button {
+                    backspace()
+                } label: {
+                    Image(systemName: "delete.left")
+                        .frame(minWidth: 34, minHeight: 36)
+                }
+                .buttonStyle(.bordered)
+
+                Button("Clear", role: .destructive) { clear() }
+                    .buttonStyle(.bordered)
+            }
+
+            Text("Fallback input only · no clipboard · no key logging · no persistence")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider() }
+    }
+}
+
 private enum PrivateTailnetSSHProfilePersistence {
     // Deliberately use a local-only Keychain item instead of UserDefaults.
     // Swift Playgrounds App Preview did not preserve the UserDefaults-backed
@@ -183,6 +341,7 @@ struct ContentView: View {
     @State private var activeClient: IntegratedSSHClient?
     @State private var isBusy = false
     @State private var status = "Select or add a saved Tailnet host. No network connection starts automatically."
+    @State private var appKeyboardTarget: PrivateTailnetSSHAppKeyboardTarget?
 
     init() {
         let loaded = PrivateTailnetSSHProfilePersistence.load()
@@ -240,6 +399,13 @@ struct ContentView: View {
                     systemImage: "terminal",
                     description: Text("Add a Tailnet host profile. Saving/selecting a profile never opens a network connection.")
                 )
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let target = appKeyboardTarget,
+               !target.belongsToProfileEditor,
+               !showProfileEditor {
+                appKeyboardPanel(for: target)
             }
         }
         .sheet(isPresented: $showProfileEditor) {
@@ -443,25 +609,36 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
                 .disabled(shellConnected || isBusy)
 
-                SecureField("SSH password — transient, local only", text: $password)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(.password)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled(true)
-                    .disabled(profile.pinnedHostKey == nil || controlsLocked)
+                HStack(spacing: 8) {
+                    SecureField("SSH password — transient, local only", text: $password)
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.password)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .disabled(profile.pinnedHostKey == nil || controlsLocked)
+
+                    appKeyboardButton(
+                        .password,
+                        disabled: profile.pinnedHostKey == nil || controlsLocked
+                    )
+                }
 
                 Text("The password is never persisted in the profile. It is cleared from UI state before network authentication begins and again on completion/background/disconnect. Swift String memory is not formally zeroizable.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 if mode == .exec {
-                    TextField("Command", text: $command, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.body.monospaced())
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled(true)
-                        .disabled(controlsLocked)
-                        .lineLimit(1...4)
+                    HStack(alignment: .top, spacing: 8) {
+                        TextField("Command", text: $command, axis: .vertical)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                            .disabled(controlsLocked)
+                            .lineLimit(1...4)
+
+                        appKeyboardButton(.command, disabled: controlsLocked)
+                    }
 
                     Button {
                         Task { await runExec(profile) }
@@ -550,6 +727,8 @@ struct ContentView: View {
                                 Task { await sendShellLine() }
                             }
 
+                        appKeyboardButton(.shellInput, disabled: false)
+
                         Button {
                             Task { await sendShellLine() }
                         } label: {
@@ -577,16 +756,27 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 Section("Saved host") {
-                    TextField("Label", text: $editLabel)
-                    TextField("Tailnet IPv4", text: $editHost)
-                        .font(.body.monospaced())
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled(true)
-                        .keyboardType(.numbersAndPunctuation)
-                    TextField("Username", text: $editUsername)
-                        .font(.body.monospaced())
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled(true)
+                    HStack(spacing: 8) {
+                        TextField("Label", text: $editLabel)
+                        appKeyboardButton(.profileLabel, disabled: false)
+                    }
+
+                    HStack(spacing: 8) {
+                        TextField("Tailnet IPv4", text: $editHost)
+                            .font(.body.monospaced())
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                            .keyboardType(.numbersAndPunctuation)
+                        appKeyboardButton(.profileHost, disabled: false)
+                    }
+
+                    HStack(spacing: 8) {
+                        TextField("Username", text: $editUsername)
+                            .font(.body.monospaced())
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                        appKeyboardButton(.profileUsername, disabled: false)
+                    }
 
                     LabeledContent("SSH port", value: "22 (fixed in v1)")
                 }
@@ -608,6 +798,7 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
+                        appKeyboardTarget = nil
                         showProfileEditor = false
                     }
                 }
@@ -617,6 +808,86 @@ struct ContentView: View {
                     }
                 }
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let target = appKeyboardTarget,
+                   target.belongsToProfileEditor {
+                    appKeyboardPanel(for: target)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func appKeyboardButton(
+        _ target: PrivateTailnetSSHAppKeyboardTarget,
+        disabled: Bool
+    ) -> some View {
+        Button {
+            appKeyboardTarget = appKeyboardTarget == target ? nil : target
+        } label: {
+            Image(systemName: "keyboard")
+        }
+        .buttonStyle(.bordered)
+        .disabled(disabled)
+        .accessibilityLabel("App keyboard for \(target.title)")
+    }
+
+    @ViewBuilder
+    private func appKeyboardPanel(
+        for target: PrivateTailnetSSHAppKeyboardTarget
+    ) -> some View {
+        PrivateTailnetSSHAppKeyboard(
+            targetTitle: target.title,
+            append: { appendAppKeyboardText($0, to: target) },
+            backspace: { backspaceAppKeyboardTarget(target) },
+            clear: { clearAppKeyboardTarget(target) },
+            dismiss: { appKeyboardTarget = nil }
+        )
+    }
+
+    private func appendAppKeyboardText(
+        _ text: String,
+        to target: PrivateTailnetSSHAppKeyboardTarget
+    ) {
+        switch target {
+        case .profileLabel: editLabel += text
+        case .profileHost: editHost += text
+        case .profileUsername: editUsername += text
+        case .password: password += text
+        case .command: command += text
+        case .shellInput: shellInput += text
+        }
+    }
+
+    private func backspaceAppKeyboardTarget(
+        _ target: PrivateTailnetSSHAppKeyboardTarget
+    ) {
+        switch target {
+        case .profileLabel:
+            if !editLabel.isEmpty { editLabel.removeLast() }
+        case .profileHost:
+            if !editHost.isEmpty { editHost.removeLast() }
+        case .profileUsername:
+            if !editUsername.isEmpty { editUsername.removeLast() }
+        case .password:
+            if !password.isEmpty { password.removeLast() }
+        case .command:
+            if !command.isEmpty { command.removeLast() }
+        case .shellInput:
+            if !shellInput.isEmpty { shellInput.removeLast() }
+        }
+    }
+
+    private func clearAppKeyboardTarget(
+        _ target: PrivateTailnetSSHAppKeyboardTarget
+    ) {
+        switch target {
+        case .profileLabel: editLabel = ""
+        case .profileHost: editHost = ""
+        case .profileUsername: editUsername = ""
+        case .password: password = ""
+        case .command: command = ""
+        case .shellInput: shellInput = ""
         }
     }
 
@@ -626,6 +897,7 @@ struct ContentView: View {
         editHost = ""
         editUsername = ""
         profileEditorError = ""
+        appKeyboardTarget = nil
         showProfileEditor = true
     }
 
@@ -635,6 +907,7 @@ struct ContentView: View {
         editHost = profile.host
         editUsername = profile.username
         profileEditorError = ""
+        appKeyboardTarget = nil
         showProfileEditor = true
     }
 
@@ -691,6 +964,7 @@ struct ContentView: View {
         }
 
         PrivateTailnetSSHProfilePersistence.save(profiles)
+        appKeyboardTarget = nil
         showProfileEditor = false
     }
 
@@ -1059,6 +1333,7 @@ struct ContentView: View {
         password = ""
         pendingHostKey = nil
         shellInput = ""
+        appKeyboardTarget = nil
 
         status = reason
     }
@@ -1071,6 +1346,7 @@ struct ContentView: View {
         execExitStatus = nil
         shellTranscript = ""
         shellInput = ""
+        appKeyboardTarget = nil
         status = "Profile selected. No network connection started."
     }
 }
