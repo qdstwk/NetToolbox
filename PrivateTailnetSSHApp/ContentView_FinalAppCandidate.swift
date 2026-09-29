@@ -692,9 +692,6 @@ struct ContentView: View {
 #if canImport(UIKit)
             PrivateTailnetSSHForegroundGuard.shared.disarm(client)
 #endif
-#if canImport(UIKit)
-            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
-#endif
             client.close()
             if activeClient === client { activeClient = nil }
             isBusy = false
@@ -788,9 +785,6 @@ struct ContentView: View {
 #if canImport(UIKit)
             PrivateTailnetSSHForegroundGuard.shared.disarm(client)
 #endif
-#if canImport(UIKit)
-            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
-#endif
             client.close()
             if activeClient === client { activeClient = nil }
             password = ""
@@ -879,17 +873,11 @@ struct ContentView: View {
 #if canImport(UIKit)
             PrivateTailnetSSHForegroundGuard.shared.disarm(client)
 #endif
-#if canImport(UIKit)
-            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
-#endif
             client.close()
             activeClient = nil
             isBusy = false
             status = "HARD FAIL: Host Key changed before shell authentication."
         } catch SSHError.authFailed {
-#if canImport(UIKit)
-            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
-#endif
 #if canImport(UIKit)
             PrivateTailnetSSHForegroundGuard.shared.disarm(client)
 #endif
@@ -901,17 +889,11 @@ struct ContentView: View {
 #if canImport(UIKit)
             PrivateTailnetSSHForegroundGuard.shared.disarm(client)
 #endif
-#if canImport(UIKit)
-            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
-#endif
             client.close()
             activeClient = nil
             isBusy = false
             status = "FAIL: PTY/shell setup exceeded the hard deadline; transport was force-closed."
         } catch {
-#if canImport(UIKit)
-            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
-#endif
 #if canImport(UIKit)
             PrivateTailnetSSHForegroundGuard.shared.disarm(client)
 #endif
@@ -936,9 +918,6 @@ struct ContentView: View {
             #if canImport(UIKit)
             PrivateTailnetSSHForegroundGuard.shared.disarm(client)
 #endif
-#if canImport(UIKit)
-            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
-#endif
             client.close()
                         break
                     }
@@ -951,9 +930,6 @@ struct ContentView: View {
 
             if activeClient === client {
     #if canImport(UIKit)
-            PrivateTailnetSSHForegroundGuard.shared.disarm(client)
-#endif
-#if canImport(UIKit)
             PrivateTailnetSSHForegroundGuard.shared.disarm(client)
 #endif
             client.close()
