@@ -103,3 +103,22 @@ The UI candidate now adds a process-level `PrivateTailnetSSHForegroundGuard`:
 This change is UI/lifecycle orchestration only. The frozen validated Core blob remains unchanged.
 
 Acceptance criterion for the next live test: while an interactive shell is connected, switching away from Swift Playgrounds must revoke the SSH transport at the earliest UIKit deactivation event; returning to the app must show no active shell and no automatic reconnect.
+
+
+## Live validation progress
+
+Validated on iPadOS Swift Playgrounds against HP-NAS:
+
+- Add/save/select profile with no automatic connection: PASS
+- First-use Host Key verification + explicit exact-pin trust: PASS
+- Final-UI interactive shell connect + one-reader receive: PASS
+- Final-UI shell input / user exit / clean close: PASS
+- Foreground loss immediate force-close after direct UIKit lifecycle guard: PASS
+- Final-UI exec: exact pin + real password + stdout + exit-status + clean close: PASS
+
+Still open before UI freeze:
+
+- Relaunch persistence: profile + exact Host Key pin must restore; password must not restore
+- Invalid/non-Tailnet destination rejection
+- Pin reset/delete behavior
+- Single-session rejection while one session is active
