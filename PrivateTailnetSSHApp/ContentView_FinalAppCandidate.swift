@@ -1,6 +1,7 @@
 import SwiftUI
 import Foundation
 import Combine
+import Security
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -75,28 +76,79 @@ private enum PrivateTailnetSSHMode: String, CaseIterable, Identifiable {
 }
 
 private enum PrivateTailnetSSHProfilePersistence {
-    static let key = "privateTailnetSSH.profiles.v1"
+    // Deliberately use a local-only Keychain item instead of UserDefaults.
+    // Swift Playgrounds App Preview did not preserve the UserDefaults-backed
+    // profile across a stop/re-run live test. The profile contains no login
+    // password, but the exact Host Key pin is a security anchor and benefits
+    // from durable, non-synchronizing local storage.
+    private static let service = "PrivateTailnetSSH.profile-store.v1"
+    private static let account = "profiles"
 
     static func load() -> [SSHConnectionProfile] {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let data = result as? Data,
               let decoded = try? JSONDecoder().decode([SSHConnectionProfile].self, from: data)
         else {
             return []
         }
 
-        // Fail closed on stale/invalid profile records. v1 UI supports only
-        // canonical 100.64.0.0/10 IPv4 and fixed SSH port 22.
-        return decoded.filter {
-            $0.port == 22 &&
-            SSHTailnetDestinationPolicy.allows($0.host) &&
-            SSHTailnetDestinationPolicy.canonicalIPv4($0.host) == $0.host &&
-            !$0.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Fail closed on stale/invalid records. v1 permits only canonical
+        // 100.64.0.0/10 IPv4, fixed port 22, a non-empty username, and any
+        // persisted pin must be bound to this exact host+port.
+        return decoded.filter { profile in
+            guard profile.port == 22,
+                  SSHTailnetDestinationPolicy.allows(profile.host),
+                  SSHTailnetDestinationPolicy.canonicalIPv4(profile.host) == profile.host,
+                  !profile.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                return false
+            }
+
+            if let pin = profile.pinnedHostKey {
+                return pin.host == profile.host && pin.port == profile.port
+            }
+            return true
         }
     }
 
     static func save(_ profiles: [SSHConnectionProfile]) {
         guard let data = try? JSONEncoder().encode(profiles) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+
+        let identity: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+
+        let update: [String: Any] = [
+            kSecValueData as String: data,
+            // v1 is explicitly local-only: do not make the trust database
+            // migratable or synchronizable to another device.
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+
+        let updateStatus = SecItemUpdate(
+            identity as CFDictionary,
+            update as CFDictionary
+        )
+
+        if updateStatus == errSecItemNotFound {
+            var add = identity
+            add[kSecValueData as String] = data
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            add[kSecAttrSynchronizable as String] = kCFBooleanFalse
+            _ = SecItemAdd(add as CFDictionary, nil)
+        }
     }
 }
 
