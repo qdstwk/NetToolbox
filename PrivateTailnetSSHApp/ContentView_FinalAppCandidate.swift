@@ -1,5 +1,9 @@
 import SwiftUI
 import Foundation
+import Combine
+#if canImport(UIKit)
+import UIKit
+#endif
 
 private enum PrivateTailnetSSHMode: String, CaseIterable, Identifiable {
     case exec = "Command"
@@ -154,10 +158,27 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase != .active else { return }
-            forceLocalShutdown(
-                "DISCONNECTED: app left the active foreground. SSH transport was force-closed; password and transient trust state were cleared."
-            )
+            handleForegroundLoss(source: "SwiftUI scenePhase=\(phase)")
         }
+#if canImport(UIKit)
+        // Swift Playgrounds App Preview did not reliably propagate SwiftUI
+        // scenePhase during the first live background test. Listen directly
+        // to UIKit lifecycle notifications as an independent fail-closed path.
+        // willDeactivate fires before backgrounding and also for interruptions;
+        // that conservatism is intentional for this foreground-only admin tool.
+        .onReceive(NotificationCenter.default.publisher(for: UIScene.willDeactivateNotification)) { _ in
+            handleForegroundLoss(source: "UIScene.willDeactivate")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIScene.didEnterBackgroundNotification)) { _ in
+            handleForegroundLoss(source: "UIScene.didEnterBackground")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            handleForegroundLoss(source: "UIApplication.willResignActive")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            handleForegroundLoss(source: "UIApplication.didEnterBackground")
+        }
+#endif
         .onDisappear {
             forceLocalShutdown("DISCONNECTED: PrivateTailnetSSH view closed.")
         }
@@ -859,6 +880,17 @@ struct ContentView: View {
         password = ""
         shellInput = ""
         status = reason
+    }
+
+    private func handleForegroundLoss(source: String) {
+        // Idempotent by design: SwiftUI and UIKit may report the same
+        // transition. Any one signal is enough to tear down the transport.
+        let hadActiveSSH = activeClient != nil || shellConnected || isBusy
+        forceLocalShutdown(
+            hadActiveSSH
+            ? "DISCONNECTED: foreground control was lost (\(source)). SSH transport was force-closed; password and transient trust state were cleared."
+            : "Foreground control was lost (\(source)). No SSH session was active; transient password/trust state was cleared."
+        )
     }
 
     private func forceLocalShutdown(_ reason: String) {
