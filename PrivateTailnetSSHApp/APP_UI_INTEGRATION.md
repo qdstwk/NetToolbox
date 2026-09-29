@@ -86,3 +86,20 @@ Do not promote this UI candidate into the PDA reusable standard until the follow
 11. Deleting/resetting a profile clears the relevant trust state without storing secrets.
 
 Until these pass, status is **UI INTEGRATION CANDIDATE**, not a new validated/frozen app baseline.
+
+
+## Foreground-loss hardening after first UI live test
+
+The first final-UI live test on iPadOS showed that view-level SwiftUI lifecycle handling did not close the SSH transport quickly enough for the project's "switch app = disconnect" requirement.
+
+The UI candidate now adds a process-level `PrivateTailnetSSHForegroundGuard`:
+
+- it is armed only while an `IntegratedSSHClient` is the current active transport;
+- it listens directly to `UIScene.willDeactivateNotification` and `UIApplication.willResignActiveNotification` (plus background notifications);
+- observers use `NotificationCenter.addObserver(..., queue: nil)`, so the current client's `close()` runs synchronously inside the lifecycle notification delivery path instead of waiting for SwiftUI/Combine rendering;
+- view-level lifecycle handlers remain only as a second path for UI/transient-state cleanup;
+- no timer, keepalive, reconnect loop or background worker was added.
+
+This change is UI/lifecycle orchestration only. The frozen validated Core blob remains unchanged.
+
+Acceptance criterion for the next live test: while an interactive shell is connected, switching away from Swift Playgrounds must revoke the SSH transport at the earliest UIKit deactivation event; returning to the app must show no active shell and no automatic reconnect.
