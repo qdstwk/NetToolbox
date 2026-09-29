@@ -122,3 +122,18 @@ Still open before UI freeze:
 - Invalid/non-Tailnet destination rejection
 - Pin reset/delete behavior
 - Single-session rejection while one session is active
+
+
+## Persistence finding after first relaunch test
+
+The first iPadOS App Preview stop/re-run test did **not** restore the HP-NAS profile from the original UserDefaults-backed implementation. Therefore profile/pin persistence was NOT accepted.
+
+The UI candidate now stores the encoded `[SSHConnectionProfile]` in a local-only generic-password Keychain item using `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` and `kSecAttrSynchronizable=false`.
+
+Security boundary remains unchanged:
+- the persisted record contains label, canonical Tailnet IPv4, fixed port 22, username and exact `PinnedSSHHostKey`;
+- it contains no SSH login password;
+- the trust database is device-local and intentionally non-synchronizing;
+- frozen Core is unchanged.
+
+The relaunch persistence test must be rerun before this item can PASS.
