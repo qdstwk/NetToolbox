@@ -118,11 +118,15 @@ Validated on iPadOS Swift Playgrounds against HP-NAS:
 - Relaunch persistence after Keychain migration: profile + exact Host Key pin restored; password not restored; no auto-connect: PASS
 - Destination/profile gate: RFC1918 LAN IPv4, public IPv4 and non-canonical Tailnet IPv4 with leading zero were rejected before profile creation: PASS
 - Host Key pin reset: reset removed the saved exact pin, re-disabled password entry, did not auto-connect, and required a fresh first-use verify + explicit trust before password entry was re-enabled: PASS
+- Profile delete persistence: deleting the saved HP-NAS profile removed it durably across stop/re-run and did not auto-connect: PASS
+- Single-session UI prevention: while an interactive shell was active, profile selection/add/mode/connection controls were locked; no second session could be initiated from the final UI: PASS
 
-Still open before UI freeze:
+Final live-validation status before freeze:
 
-- Profile delete persistence
-- Single-session / second-session prevention while one session is active
+- Profile delete persistence: PASS — deleting HP-NAS removed the saved profile; stop/re-run did not restore it and no connection started.
+- Single-session / second-session prevention while one shell session is active: PASS — host selection/add/mode/connection entry points remained locked, so the UI could not start a second session; frozen Core process-wide single-session gate remains the lower-level fail-closed backstop.
+
+All final UI acceptance items are now closed.
 
 
 ## Persistence finding after first relaunch test
@@ -138,3 +142,13 @@ Security boundary remains unchanged:
 - frozen Core is unchanged.
 
 Relaunch persistence was rerun on iPadOS after the Keychain migration and PASS: profile + exact Host Key pin restored, password did not restore, and the app did not auto-connect.
+
+
+## Final acceptance
+
+Status: **VALIDATED / READY TO FREEZE**
+
+The final UI candidate has now passed the complete iPadOS live acceptance gate:
+profile add/save/select without auto-connect; first-use Host Key verify + explicit exact-pin trust; real-password exec; PTY/interactive shell; single-reader receive; shell input and clean exit; immediate foreground-loss force-close; Keychain-backed profile + exact-pin persistence with password non-persistence; invalid destination rejection; Host Key pin reset/re-verify; durable profile delete; and second-session prevention while one session is active.
+
+The validated UI does not alter the frozen SSH Core. The Core blob must remain `537ea89814d8dc77130225d289cfc665f1ee3638`.
