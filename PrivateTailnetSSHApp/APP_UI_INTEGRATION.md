@@ -116,10 +116,10 @@ Validated on iPadOS Swift Playgrounds against HP-NAS:
 - Foreground loss immediate force-close after direct UIKit lifecycle guard: PASS
 - Final-UI exec: exact pin + real password + stdout + exit-status + clean close: PASS
 - Relaunch persistence after Keychain migration: profile + exact Host Key pin restored; password not restored; no auto-connect: PASS
+- Destination/profile gate: RFC1918 LAN IPv4, public IPv4 and non-canonical Tailnet IPv4 with leading zero were rejected before profile creation: PASS
 
 Still open before UI freeze:
 
-- Invalid/non-Tailnet destination rejection
 - Pin reset/delete behavior
 - Single-session rejection while one session is active
 
